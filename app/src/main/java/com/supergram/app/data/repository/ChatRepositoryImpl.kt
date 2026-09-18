@@ -2,6 +2,9 @@ package com.supergram.app.data.repository
 
 import com.supergram.app.core.telegram.TelegramClientManager
 import com.supergram.app.domain.model.Chat
+import com.supergram.app.domain.model.ChatCategory
+import com.supergram.app.domain.model.MediaFile
+import com.supergram.app.domain.model.MediaKind
 import com.supergram.app.domain.model.Message
 import com.supergram.app.domain.repository.ChatRepository
 import kotlinx.coroutines.CoroutineName
@@ -17,15 +20,16 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.drinkless.tdlib.TdApi
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * TDLib-backed implementation of [ChatRepository].
  *
- * In addition to the request/response methods, it observes
- * [TelegramClientManager.updates] and keeps the chat list fresh in real time:
+ * Observes [TelegramClientManager.updates] and keeps state fresh in real time:
  *  - TdApi.UpdateNewMessage        -> newMessages stream + last message refresh
  *  - TdApi.UpdateChatLastMessage   -> last message / order refresh
  *  - TdApi.UpdateChatReadInbox     -> unread counter refresh
+ *  - TdApi.UpdateFile              -> file download progress (photos/documents)
  *
  * All TDLib types stay inside the data layer.
  */
@@ -42,6 +46,9 @@ class ChatRepositoryImpl(
 
     private val _newMessages = MutableSharedFlow<Message>(extraBufferCapacity = 128)
     override val newMessages: SharedFlow<Message> = _newMessages.asSharedFlow()
+
+    private val _fileUpdates = MutableSharedFlow<MediaFile>(extraBufferCapacity = 256)
+    override val fileUpdates: SharedFlow<MediaFile> = _fileUpdates.asSharedFlow()
 
     init {
         observeTdlibUpdates()
@@ -95,6 +102,37 @@ class ChatRepositoryImpl(
         ifErrorThrow(clientManager.send(request))
     }
 
+    override suspend fun openChat(chatId: Long): Result<Unit> = runCatching {
+        ifErrorThrow(clientManager.send(TdApi.OpenChat(chatId)))
+    }
+
+    override suspend fun closeChat(chatId: Long): Result<Unit> = runCatching {
+        ifErrorThrow(clientManager.send(TdApi.CloseChat(chatId)))
+    }
+
+    override suspend fun viewMessages(chatId: Long, messageIds: List<Long>): Result<Unit> =
+        runCatching {
+            if (messageIds.isEmpty()) return@runCatching
+            val request = TdApi.ViewMessages().apply {
+                this.chatId = chatId
+                this.messageIds = messageIds.toLongArray()
+                source = TdApi.MessageSourceChatHistory()
+                forceRead = true
+            }
+            ifErrorThrow(clientManager.send(request))
+        }
+
+    override suspend fun downloadFile(fileId: Int): Result<Unit> = runCatching {
+        val request = TdApi.DownloadFile().apply {
+            this.fileId = fileId
+            priority = 32 // 1..32, foreground priority
+            offset = 0
+            limit = 0 // 0 = whole file
+            synchronous = false
+        }
+        ifErrorThrow(clientManager.send(request))
+    }
+
     fun dispose() {
         scope.cancel()
     }
@@ -112,6 +150,7 @@ class ChatRepositoryImpl(
                         update.positions,
                     )
                     is TdApi.UpdateChatReadInbox -> onUnreadCount(update.chatId, update.unreadCount)
+                    is TdApi.UpdateFile -> onFileUpdate(update.file)
                     else -> Unit
                 }
             }
@@ -148,6 +187,16 @@ class ChatRepositoryImpl(
         updateChat(chatId) { it.copy(unreadCount = unreadCount) }
     }
 
+    private fun onFileUpdate(file: TdApi.File) {
+        val descriptor = fileDescriptors[file.id]
+        val state = file.toDomainMediaFile(
+            kind = descriptor?.kind ?: MediaKind.PHOTO,
+            fileName = descriptor?.fileName,
+        )
+        fileDescriptors[file.id] = state
+        scope.launch { _fileUpdates.emit(state) }
+    }
+
     private fun updateChatLastMessage(message: TdApi.Message) {
         updateChat(message.chatId) {
             it.copy(
@@ -181,16 +230,39 @@ private fun ifErrorThrow(result: TdApi.Object) {
 
 // ------------------------------------------------------------------ mappers
 
-/** Maps a TDLib chat to the domain [Chat]. */
-fun TdApi.Chat.toDomainChat(): Chat = Chat(
-    id = id,
-    title = title.orEmpty(),
-    lastMessageSnippet = lastMessage?.content?.toSnippet(),
-    lastMessageDate = lastMessage?.date?.toLong(),
-    unreadCount = unreadCount,
-    order = positions.orEmpty()
-        .firstOrNull { it.list is TdApi.ChatListMain }?.order ?: 0L,
-)
+/**
+ * Maps a TDLib chat to the domain [Chat], resolving the category:
+ * private/secret chats are checked against GetUser to detect bots.
+ */
+suspend fun TdApi.Chat.toDomainChat(): Chat {
+    val category = when (type) {
+        is TdApi.ChatTypePrivate -> resolveUserCategory((type as TdApi.ChatTypePrivate).userId)
+        is TdApi.ChatTypeSecret -> ChatCategory.DIRECT
+        is TdApi.ChatTypeBasicGroup -> ChatCategory.GROUP
+        is TdApi.ChatTypeSupergroup ->
+            if ((type as TdApi.ChatTypeSupergroup).isChannel) ChatCategory.CHANNEL
+            else ChatCategory.GROUP
+        else -> ChatCategory.DIRECT
+    }
+    return Chat(
+        id = id,
+        title = title.orEmpty(),
+        category = category,
+        lastMessageSnippet = lastMessage?.content?.toSnippet(),
+        lastMessageDate = lastMessage?.date?.toLong(),
+        unreadCount = unreadCount,
+        order = positions.orEmpty()
+            .firstOrNull { it.list is TdApi.ChatListMain }?.order ?: 0L,
+    )
+}
+
+/** DIRECT for regular users, BOT for bot accounts. */
+private suspend fun resolveUserCategory(userId: Long): ChatCategory =
+    when (val user = TelegramClientManager.send(TdApi.GetUser(userId))) {
+        is TdApi.User ->
+            if (user.type is TdApi.UserTypeBot) ChatCategory.BOT else ChatCategory.DIRECT
+        else -> ChatCategory.DIRECT
+    }
 
 /** Maps a TDLib message to the domain [Message]. */
 fun TdApi.Message.toDomainMessage(): Message = Message(
@@ -200,7 +272,39 @@ fun TdApi.Message.toDomainMessage(): Message = Message(
     text = content.toSnippet(),
     isOutgoing = isOutgoing,
     date = date.toLong(),
+    media = content.toDomainMediaFile(),
 )
+
+/** Extracts the download state of a photo/document attachment, if any. */
+fun TdApi.MessageContent.toDomainMediaFile(): MediaFile? = when (this) {
+    is TdApi.MessagePhoto -> {
+        val size = photo.sizes.orEmpty().maxByOrNull { it.width }
+        size?.photo?.toDomainMediaFile(MediaKind.PHOTO, null)?.also {
+            fileDescriptors[it.fileId] = it
+        }
+    }
+    is TdApi.MessageDocument -> {
+        document.document
+            .toDomainMediaFile(MediaKind.DOCUMENT, document.fileName)
+            ?.also { fileDescriptors[it.fileId] = it }
+    }
+    else -> null
+}
+
+/** Maps a TDLib file to the domain [MediaFile] download state. */
+fun TdApi.File.toDomainMediaFile(kind: MediaKind, fileName: String?): MediaFile = MediaFile(
+    kind = kind,
+    fileId = id,
+    fileName = fileName,
+    expectedSize = if (expectedSize > 0) expectedSize else size,
+    downloadedSize = local?.downloadedSize ?: 0,
+    isDownloadingActive = local?.isDownloadingActive ?: false,
+    isDownloaded = local?.isDownloadingCompleted ?: false,
+    localPath = local?.path?.takeIf { it.isNotEmpty() },
+)
+
+// Process-wide descriptor cache (kind, name, last state) per TDLib file id.
+private val fileDescriptors = ConcurrentHashMap<Int, MediaFile>()
 
 /** Best-effort plain-text preview for any TDLib message content. */
 fun TdApi.MessageContent.toSnippet(): String = when (this) {

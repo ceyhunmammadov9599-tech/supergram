@@ -20,6 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Badge
+import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -30,13 +32,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import com.supergram.app.domain.model.Chat
+import com.supergram.app.domain.model.ChatCategory
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -54,6 +60,23 @@ fun ChatListScreen(
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val loading by viewModel.loading.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
+
+    // Category filter tabs (All / Direct / Groups / Channels / Bots).
+    val categories = listOf(
+        null,                       // All
+        ChatCategory.DIRECT,
+        ChatCategory.GROUP,
+        ChatCategory.CHANNEL,
+        ChatCategory.BOT,
+    )
+    val labels = listOf("All", "Direct", "Groups", "Channels", "Bots")
+    var selectedTab by remember { mutableIntStateOf(0) }
+
+    // Reactive: re-evaluates on every live chats update.
+    val visibleChats = remember(chats, selectedTab) {
+        val category = categories.getOrNull(selectedTab)
+        if (category == null) chats else chats.filter { it.category == category }
+    }
 
     Scaffold(
         topBar = {
@@ -78,6 +101,24 @@ fun ChatListScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            ScrollableTabRow(
+                selectedTabIndex = selectedTab,
+                edgePadding = 16.dp,
+            ) {
+                labels.forEachIndexed { index, label ->
+                    Tab(
+                        selected = selectedTab == index,
+                        onClick = { selectedTab = index },
+                        text = {
+                            val count = categories.getOrNull(index)
+                                ?.let { c -> chats.count { it.category == c } }
+                                ?: chats.size
+                            Text("$label ($count)")
+                        },
+                    )
+                }
+            }
+
             error?.let { message ->
                 Text(
                     text = message,
@@ -87,7 +128,7 @@ fun ChatListScreen(
                 )
             }
 
-            if (chats.isEmpty() && !loading) {
+            if (visibleChats.isEmpty() && !loading) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center,
@@ -101,7 +142,7 @@ fun ChatListScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    items(chats, key = { it.id }) { chat ->
+                    items(visibleChats, key = { it.id }) { chat ->
                         ChatRow(chat = chat, onClick = { onChatClick(chat.id) })
                     }
                 }

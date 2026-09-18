@@ -8,10 +8,15 @@ import com.supergram.app.domain.repository.TelegramAuthRepository
 import com.supergram.app.domain.usecase.LoadChatHistoryUseCase
 import com.supergram.app.domain.usecase.LoadChatsUseCase
 import com.supergram.app.domain.usecase.ObserveAuthStateUseCase
+import com.supergram.app.domain.usecase.CloseChatUseCase
+import com.supergram.app.domain.usecase.DownloadFileUseCase
 import com.supergram.app.domain.usecase.ObserveChatListUseCase
+import com.supergram.app.domain.usecase.ObserveFileUpdatesUseCase
 import com.supergram.app.domain.usecase.ObserveNewMessagesUseCase
 import com.supergram.app.domain.usecase.RequestAuthCodeUseCase
+import com.supergram.app.domain.usecase.OpenChatUseCase
 import com.supergram.app.domain.usecase.SendMessageUseCase
+import com.supergram.app.domain.usecase.ViewMessagesUseCase
 import com.supergram.app.domain.usecase.SubmitAuthCodeUseCase
 import com.supergram.app.domain.usecase.SubmitPasswordUseCase
 
@@ -66,5 +71,25 @@ object AppContainer {
 
     val sendMessage: SendMessageUseCase by lazy {
         SendMessageUseCase(chatRepository)
+    }
+
+    val openChat: OpenChatUseCase by lazy {
+        OpenChatUseCase(chatRepository)
+    }
+
+    val closeChat: CloseChatUseCase by lazy {
+        CloseChatUseCase(chatRepository)
+    }
+
+    val viewMessages: ViewMessagesUseCase by lazy {
+        ViewMessagesUseCase(chatRepository)
+    }
+
+    val downloadFile: DownloadFileUseCase by lazy {
+        DownloadFileUseCase(chatRepository)
+    }
+
+    val observeFileUpdates: ObserveFileUpdatesUseCase by lazy {
+        ObserveFileUpdatesUseCase(chatRepository)
     }
 }

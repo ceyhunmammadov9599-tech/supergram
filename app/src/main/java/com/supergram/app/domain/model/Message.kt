@@ -13,4 +13,6 @@ data class Message(
     val isOutgoing: Boolean,
     /** Unix seconds. */
     val date: Long,
+    /** Photo or document attachment with its download state, if any. */
+    val media: MediaFile?,
 )
