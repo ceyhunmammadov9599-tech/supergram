@@ -5,23 +5,30 @@ import androidx.lifecycle.viewModelScope
 import com.supergram.app.di.AppContainer
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.Message
+import com.supergram.app.domain.model.SearchResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineScope
+import com.supergram.app.domain.usecase.searchDebounce
 
 /**
  * MVVM ViewModel for a single chat: message history + real-time incoming
  * messages + outgoing message dispatch + chat lifecycle (open/close) +
- * read state + media download states.
+ * read state + media download states + in-chat search with jump-to-message.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class ChatDetailViewModel(
     private val chatId: Long,
     observeNewMessages: com.supergram.app.domain.usecase.ObserveNewMessagesUseCase,
@@ -33,6 +40,8 @@ class ChatDetailViewModel(
     private val downloadFileUseCase: com.supergram.app.domain.usecase.DownloadFileUseCase,
     observeFileUpdates: com.supergram.app.domain.usecase.ObserveFileUpdatesUseCase,
     private val voicePlayer: com.supergram.app.core.audio.VoiceNotePlayer,
+    private val searchChatMessages: com.supergram.app.domain.usecase.SearchChatMessagesUseCase,
+    private val targetMessageId: Long? = null,
 ) : ViewModel() {
 
     /** Newest messages first (as returned by TDLib); UI reverses for display. */
@@ -69,6 +78,32 @@ class ChatDetailViewModel(
     /** Decides play vs download and auto-plays once a pending download completes. */
     private val autoPlay = com.supergram.app.domain.usecase.VoiceAutoPlayController()
 
+    // ------------------------- In-chat search -------------------------
+
+    /** Current search query (debounced 300 ms before hitting TDLib). */
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _searchActive = MutableStateFlow(false)
+    val searchActive: StateFlow<Boolean> = _searchActive.asStateFlow()
+
+    /** In-chat search results, refreshed reactively from the debounced query. */
+    val searchResults: StateFlow<List<SearchResult>> =
+        _searchQuery
+            .searchDebounce()
+            .flatMapLatest { query ->
+                flow {
+                    searchChatMessages(chatId, query)
+                        .onSuccess { emit(it) }
+                        .onFailure { emit(emptyList()) }
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    /** Message id the UI should scroll to (jump-to-result), or null. */
+    private val _scrollTarget = MutableStateFlow<Long?>(null)
+    val scrollTarget: StateFlow<Long?> = _scrollTarget.asStateFlow()
+
     init {
         // Chat lifecycle: open on enter (TDLib stream optimization).
         viewModelScope.launch {
@@ -84,6 +119,8 @@ class ChatDetailViewModel(
                     viewMessages(chatId, page.map { it.id })
                 }
                 .onFailure { _error.value = it.message ?: "Failed to load history" }
+            // Deep link from global search: load a window around the target.
+            targetMessageId?.let { jumpToMessageById(it) }
         }
 
         // Real-time stream for this chat only.
@@ -162,6 +199,60 @@ class ChatDetailViewModel(
         }
     }
 
+    // ------------------------- Search actions -------------------------
+
+    fun setQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    fun toggleSearch() {
+        _searchActive.value = !_searchActive.value
+        if (!_searchActive.value) {
+            _searchQuery.value = ""
+        }
+    }
+
+    fun closeSearch() {
+        _searchActive.value = false
+        _searchQuery.value = ""
+    }
+
+    fun clearScrollTarget() {
+        _scrollTarget.value = null
+    }
+
+    /** Jump to a search result inside this chat. */
+    fun jumpToMessage(result: SearchResult) {
+        jumpToMessageById(result.messageId)
+    }
+
+    /**
+     * Scrolls to a message id when possible. If the message is outside the
+     * loaded window, loads the surrounding pages from TDLib, merges them
+     * into the stream, and then scrolls.
+     */
+    fun jumpToMessageById(messageId: Long) {
+        if (messages.value.any { it.id == messageId }) {
+            _scrollTarget.value = messageId
+            return
+        }
+        viewModelScope.launch {
+            val after = loadChatHistory(chatId, fromMessageId = messageId + 1, limit = 25)
+                .getOrDefault(emptyList())
+            val before = loadChatHistory(chatId, fromMessageId = messageId, limit = 25)
+                .getOrDefault(emptyList())
+            val window = (after + before).distinctBy { it.id }
+            if (window.isNotEmpty()) {
+                history.value = (history.value + window)
+                    .distinctBy { it.id }
+                    .sortedWith(compareByDescending<Message> { it.date }.thenByDescending { it.id })
+                _scrollTarget.value = messageId
+            } else {
+                _error.value = "Message not found"
+            }
+        }
+    }
+
     fun dismissError() {
         _error.value = null
     }
@@ -179,7 +270,10 @@ class ChatDetailViewModel(
     }
 
     companion object {
-        fun create(chatId: Long): ChatDetailViewModel = ChatDetailViewModel(
+        fun create(
+            chatId: Long,
+            targetMessageId: Long? = null,
+        ): ChatDetailViewModel = ChatDetailViewModel(
             chatId,
             AppContainer.observeNewMessages,
             AppContainer.loadChatHistory,
@@ -190,6 +284,8 @@ class ChatDetailViewModel(
             AppContainer.downloadFile,
             AppContainer.observeFileUpdates,
             AppContainer.voicePlayer,
+            AppContainer.searchChatMessages,
+            targetMessageId,
         )
     }
 }

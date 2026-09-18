@@ -92,6 +92,15 @@ object AppContainer {
     val downloadFile: DownloadFileUseCase by lazy {
         DownloadFileUseCase(chatRepository)
     }
+    /** In-chat message search (TdApi.SearchChatMessages). */
+    val searchChatMessages: com.supergram.app.domain.usecase.SearchChatMessagesUseCase by lazy {
+        com.supergram.app.domain.usecase.SearchChatMessagesUseCase(chatRepository)
+    }
+
+    /** Global cross-chat message search (TdApi.SearchMessages). */
+    val searchMessages: com.supergram.app.domain.usecase.SearchMessagesUseCase by lazy {
+        com.supergram.app.domain.usecase.SearchMessagesUseCase(chatRepository)
+    }
 
     val observeFileUpdates: ObserveFileUpdatesUseCase by lazy {
         ObserveFileUpdatesUseCase(chatRepository)

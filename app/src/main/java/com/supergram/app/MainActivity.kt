@@ -40,6 +40,7 @@ class MainActivity : ComponentActivity() {
 fun SuperGramApp() {
     val authState by TelegramClientManager.authState.collectAsState()
     var selectedChatId by remember { mutableStateOf<Long?>(null) }
+    var targetMessageId by remember { mutableStateOf<Long?>(null) }
     val chatListViewModel = remember { ChatListViewModel.create() }
 
     val currentChat = selectedChatId
@@ -49,15 +50,23 @@ fun SuperGramApp() {
             val chat = chatListViewModel.chats.value.firstOrNull { it.id == currentChat }
             ChatDetailScreen(
                 chatTitle = chat?.title ?: "Chat",
-                viewModel = remember(currentChat) { ChatDetailViewModel.create(currentChat) },
-                onBack = { selectedChatId = null },
+                viewModel = remember(currentChat, targetMessageId) {
+                    ChatDetailViewModel.create(currentChat, targetMessageId)
+                },
+                onBack = {
+                    selectedChatId = null
+                    targetMessageId = null
+                },
             )
         }
         // ---- Chat list (Phase 2) ----
         authState is AuthState.Ready -> {
             ChatListScreen(
                 viewModel = chatListViewModel,
-                onChatClick = { chatId -> selectedChatId = chatId },
+                onChatClick = { chatId, target ->
+                    selectedChatId = chatId
+                    targetMessageId = target
+                },
             )
         }
         // ---- Auth flow (Phase 1) ----

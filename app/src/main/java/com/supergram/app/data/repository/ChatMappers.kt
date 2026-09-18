@@ -1,6 +1,7 @@
 package com.supergram.app.data.repository
 
 import com.supergram.app.domain.model.ChatCategory
+import com.supergram.app.domain.model.SearchResult
 import org.drinkless.tdlib.TdApi
 
 /**
@@ -20,6 +21,23 @@ object ChatCategoryResolver {
                 if (chatType.isChannel) ChatCategory.CHANNEL else ChatCategory.GROUP
             else -> ChatCategory.DIRECT
         }
+}
+
+/**
+ * Maps a TDLib message into the domain [SearchResult] model.
+ * Pure mapper: chat title and sender name are resolved by the caller
+ * (they require suspend TDLib requests).
+ */
+fun TdApi.Message.toSearchResult(chatTitle: String, senderName: String?): SearchResult {
+    val snippet = (content as? TdApi.MessageText)?.text?.text ?: content.toSnippet()
+    return SearchResult(
+        messageId = id,
+        chatId = chatId,
+        chatTitle = chatTitle,
+        senderName = senderName,
+        snippet = snippet,
+        date = date.toLong(),
+    )
 }
 
 /**

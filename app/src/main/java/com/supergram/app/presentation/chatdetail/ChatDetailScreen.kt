@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -31,6 +33,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -57,7 +60,11 @@ import com.supergram.app.R
 import com.supergram.app.core.audio.VoiceNotePlayer
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.MediaKind
+import com.supergram.app.domain.model.SearchResult
+import com.supergram.app.presentation.common.SearchResultRow
+import com.supergram.app.presentation.common.highlightedText
 import com.supergram.app.domain.model.Message
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -77,6 +84,10 @@ fun ChatDetailScreen(
     val sending by viewModel.sending.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val voiceState by viewModel.voiceState.collectAsStateWithLifecycle()
+    val searchActive by viewModel.searchActive.collectAsStateWithLifecycle()
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val scrollTarget by viewModel.scrollTarget.collectAsStateWithLifecycle()
 
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -87,22 +98,67 @@ fun ChatDetailScreen(
     // Newest at the bottom; auto-scroll when a message arrives.
     val displayList = remember(messages) { messages.asReversed() }
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+        if (messages.isNotEmpty() && scrollTarget == null) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    // Jump-to-message: wait (up to 2 s) for the target to enter the stream,
+    // then scroll the LazyColumn to it.
+    LaunchedEffect(scrollTarget) {
+        val target = scrollTarget ?: return@LaunchedEffect
+        repeat(40) {
+            val list = viewModel.messages.value.asReversed()
+            val index = list.indexOfFirst { it.id == target }
+            if (index >= 0) {
+                listState.animateScrollToItem(index)
+                viewModel.clearScrollTarget()
+                return@LaunchedEffect
+            }
+            delay(50)
+        }
+        viewModel.clearScrollTarget()
     }
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(
             topBar = {
-                TopAppBar(
-                    title = {
-                        Text(chatTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                if (searchActive) {
+                    // In-chat search mode: query field replaces the title.
+                    androidx.compose.foundation.layout.Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 32.dp, start = 4.dp, end = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = viewModel::closeSearch) {
+                            Icon(Icons.Default.Close, contentDescription = "Close search")
                         }
-                    },
-                )
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = viewModel::setQuery,
+                            placeholder = { Text("Search in chat") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                } else {
+                    TopAppBar(
+                        title = {
+                            Text(chatTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = onBack) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = viewModel::toggleSearch) {
+                                Icon(Icons.Default.Search, contentDescription = "Search in chat")
+                            }
+                        },
+                    )
+                }
             },
             bottomBar = {
                 Column(Modifier.imePadding()) {
@@ -150,7 +206,38 @@ fun ChatDetailScreen(
                 }
             },
         ) { padding ->
-            if (messages.isEmpty()) {
+            if (searchActive) {
+                // ---- In-chat search results ----
+                if (searchResults.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(padding),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            if (searchQuery.isBlank()) "Type to search" else "No matches",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize().padding(padding),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        items(searchResults, key = { "sr_" + it.messageId }) { result ->
+                            SearchResultRow(
+                                result = result,
+                                query = searchQuery,
+                                showChatTitle = false,
+                                onClick = {
+                                    viewModel.closeSearch()
+                                    viewModel.jumpToMessage(result)
+                                },
+                            )
+                        }
+                    }
+                }
+            } else if (messages.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize().padding(padding),
                     contentAlignment = Alignment.Center,

@@ -5,6 +5,7 @@ import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.MediaKind
 import com.supergram.app.domain.model.Message
+import com.supergram.app.domain.model.SearchResult
 import com.supergram.app.domain.repository.ChatRepository
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -119,6 +120,88 @@ class ChatRepositoryImpl(
                 forceRead = true
             }
             ifErrorThrow(clientManager.send(request))
+        }
+
+    override suspend fun searchChatMessages(
+        chatId: Long,
+        query: String,
+        limit: Int,
+    ): Result<List<SearchResult>> {
+        val request = TdApi.SearchChatMessages().apply {
+            this.chatId = chatId
+            this.query = query
+            this.limit = limit
+            offset = 0
+            fromMessageId = 0
+        }
+        return when (val result = TelegramClientManager.send(request)) {
+            is TdApi.Messages -> {
+                val title = resolveChatTitle(chatId)
+                Result.success(
+                    result.messages.orEmpty().map { message ->
+                        message.toSearchResult(title, resolveSenderName(message.senderId))
+                    },
+                )
+            }
+            else -> Result.failure(IllegalStateException("Chat search failed"))
+        }
+    }
+
+    override suspend fun searchMessages(
+        query: String,
+        limit: Int,
+    ): Result<List<SearchResult>> {
+        val request = TdApi.SearchMessages().apply {
+            chatList = TdApi.ChatListMain()
+            this.query = query
+            offset = ""
+            this.limit = limit
+        }
+        return when (val result = TelegramClientManager.send(request)) {
+            is TdApi.FoundMessages -> {
+                val messages = result.messages.orEmpty()
+                val titles = messages.map { it.chatId }.distinct()
+                    .associateWith { resolveChatTitle(it) }
+                val senders = messages
+                    .mapNotNull { it.senderId as? TdApi.MessageSenderUser }
+                    .map { it.userId }.distinct()
+                    .associateWith { resolveUserName(it) }
+                Result.success(
+                    messages.map { message ->
+                        message.toSearchResult(
+                            chatTitle = titles[message.chatId] ?: "Chat",
+                            senderName = (message.senderId as? TdApi.MessageSenderUser)
+                                ?.let { senders[it.userId] },
+                        )
+                    },
+                )
+            }
+            else -> Result.failure(IllegalStateException("Global search failed"))
+        }
+    }
+
+    /** Chat display title via GetChat (fallback to a generic label). */
+    private suspend fun resolveChatTitle(chatId: Long): String =
+        when (val chat = TelegramClientManager.send(TdApi.GetChat(chatId))) {
+            is TdApi.Chat -> chat.title.takeIf { it.isNotBlank() } ?: "Chat"
+            else -> "Chat"
+        }
+
+    /** User display name via GetUser (null when the sender is not a user). */
+    private suspend fun resolveUserName(userId: Long): String? =
+        when (val user = TelegramClientManager.send(TdApi.GetUser(userId))) {
+            is TdApi.User -> listOfNotNull(
+                user.firstName?.takeIf { it.isNotBlank() },
+                user.lastName?.takeIf { it.isNotBlank() },
+            ).joinToString(" ").ifBlank { null }
+            else -> null
+        }
+
+    /** Sender display name for a search result. */
+    private suspend fun resolveSenderName(senderId: TdApi.MessageSender): String? =
+        when (senderId) {
+            is TdApi.MessageSenderUser -> resolveUserName(senderId.userId)
+            else -> null
         }
 
     override suspend fun downloadFile(fileId: Int): Result<Unit> = runCatching {

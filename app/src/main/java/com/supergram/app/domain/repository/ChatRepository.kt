@@ -3,6 +3,7 @@ package com.supergram.app.domain.repository
 import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.Message
+import com.supergram.app.domain.model.SearchResult
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -39,4 +40,10 @@ interface ChatRepository {
 
     /** Starts (or resumes) downloading a file; progress arrives via [fileUpdates]. */
     suspend fun downloadFile(fileId: Int): Result<Unit>
+
+    /** Searches messages inside a chat (TdApi.SearchChatMessages). */
+    suspend fun searchChatMessages(chatId: Long, query: String, limit: Int = 20): Result<List<SearchResult>>
+
+    /** Global cross-chat message search (TdApi.SearchMessages). */
+    suspend fun searchMessages(query: String, limit: Int = 20): Result<List<SearchResult>>
 }
