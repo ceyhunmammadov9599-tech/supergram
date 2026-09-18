@@ -15,13 +15,71 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Lightweight voice note playback engine built on Android's native
- * [MediaPlayer] (supports local OGG/Opus .oga files produced by TDLib).
- *
- * Exposes a single [state] stream with the active file id, play/pause flag,
- * and playback position so Compose bubbles can render progress reactively.
+ * Platform audio engine abstraction. Keeps [VoiceNotePlayer] fully
+ * unit-testable (a fake engine can be injected in JVM tests).
  */
-class VoiceNotePlayer {
+interface AudioEngine {
+    /** Invoked when playback reaches the end of the file. */
+    var onPlaybackFinished: (() -> Unit)?
+
+    /** Prepares and starts playback of a local audio file. */
+    fun start(path: String)
+
+    /** Stops playback and releases resources (no-op when idle). */
+    fun stop()
+
+    fun currentPositionMs(): Int
+
+    fun durationMs(): Int
+}
+
+/** Production engine on Android's native MediaPlayer (OGG/Opus capable). */
+class MediaPlayerEngine : AudioEngine {
+    private var player: MediaPlayer? = null
+    override var onPlaybackFinished: (() -> Unit)? = null
+
+    override fun start(path: String) {
+        stop()
+        try {
+            val mp = MediaPlayer()
+            mp.setDataSource(path)
+            mp.setOnCompletionListener { onPlaybackFinished?.invoke() }
+            mp.prepare()
+            mp.start()
+            player = mp
+        } catch (e: Exception) {
+            stop()
+            onPlaybackFinished?.invoke()
+        }
+    }
+
+    override fun stop() {
+        player?.let { mp ->
+            runCatching { mp.stop() }
+            runCatching { mp.release() }
+        }
+        player = null
+    }
+
+    override fun currentPositionMs(): Int = player?.currentPosition ?: 0
+
+    override fun durationMs(): Int = player?.duration ?: 0
+}
+
+/**
+ * Lightweight voice note playback engine. Exposes a single [state] stream
+ * with the active file id, play/pause flag, and playback position so Compose
+ * bubbles can render progress reactively.
+ *
+ * @param engine platform audio engine (injectable for tests)
+ * @param scope scope for the progress ticker (injectable for tests)
+ */
+class VoiceNotePlayer(
+    private val engine: AudioEngine = MediaPlayerEngine(),
+    private val scope: CoroutineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate + CoroutineName("VoiceNotePlayer")
+    ),
+) {
 
     /** Snapshot of the current (or last) playback session. */
     data class PlaybackState(
@@ -34,39 +92,23 @@ class VoiceNotePlayer {
     private val _state = MutableStateFlow(PlaybackState())
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
 
-    private val scope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Main.immediate + CoroutineName("VoiceNotePlayer")
-    )
-
-    private var player: MediaPlayer? = null
     private var ticker: Job? = null
+
+    init {
+        engine.onPlaybackFinished = { stopPlayback() }
+    }
 
     /** Starts playback of a downloaded voice file (stops anything playing). */
     fun play(fileId: Int, path: String) {
         stopPlayback()
-        try {
-            val mediaPlayer = MediaPlayer()
-            mediaPlayer.setDataSource(path)
-            mediaPlayer.setOnCompletionListener { stopPlayback() }
-            mediaPlayer.prepare()
-            mediaPlayer.start()
-            player = mediaPlayer
-            _state.value = PlaybackState(
-                fileId = fileId,
-                isPlaying = true,
-                positionMs = 0,
-                durationMs = mediaPlayer.duration,
-            )
-            ticker = scope.launch {
-                while (isActive && player != null) {
-                    val p = player ?: break
-                    _state.value = _state.value.copy(positionMs = p.currentPosition)
-                    delay(200)
-                }
-            }
-        } catch (e: Exception) {
-            stopPlayback()
-        }
+        engine.start(path)
+        _state.value = PlaybackState(
+            fileId = fileId,
+            isPlaying = true,
+            positionMs = 0,
+            durationMs = engine.durationMs(),
+        )
+        startTicker()
     }
 
     /** Play/pause toggle for a voice file. */
@@ -79,15 +121,11 @@ class VoiceNotePlayer {
         }
     }
 
-    /** Stops playback and releases the underlying MediaPlayer. */
+    /** Stops playback and releases the underlying engine. */
     fun stopPlayback() {
         ticker?.cancel()
         ticker = null
-        player?.let { mp ->
-            runCatching { mp.stop() }
-            runCatching { mp.release() }
-        }
-        player = null
+        engine.stop()
         _state.value = PlaybackState(
             fileId = _state.value.fileId,
             isPlaying = false,
@@ -99,5 +137,18 @@ class VoiceNotePlayer {
     fun dispose() {
         stopPlayback()
         scope.cancel()
+    }
+
+    private fun startTicker() {
+        ticker = scope.launch {
+            while (isActive && _state.value.isPlaying) {
+                _state.value = _state.value.copy(positionMs = engine.currentPositionMs())
+                delay(TICK_MS)
+            }
+        }
+    }
+
+    private companion object {
+        const val TICK_MS = 200L
     }
 }

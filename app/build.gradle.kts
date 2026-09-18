@@ -30,8 +30,8 @@ android {
         applicationId = "com.supergram.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.0.4"
 
         // Exposed to the app through BuildConfig
         buildConfigField("int", "TELEGRAM_API_ID", telegramApiId.toString())
@@ -120,4 +120,5 @@ dependencies {
 
     // Testing
     testImplementation(libs.junit)
+    testImplementation(libs.coroutines.test)
 }

@@ -19,6 +19,8 @@ data class MediaFile(
     val localPath: String?,
     /** Voice note duration in seconds (null for photos/documents). */
     val durationSeconds: Int? = null,
+    /** Voice note waveform amplitudes, normalized to 0f..1f (photos/documents: null). */
+    val waveform: List<Float>? = null,
 ) {
     /** 0f..1f progress estimate for the UI. */
     val progress: Float

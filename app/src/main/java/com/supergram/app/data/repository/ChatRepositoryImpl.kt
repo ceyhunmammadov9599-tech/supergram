@@ -2,7 +2,6 @@ package com.supergram.app.data.repository
 
 import com.supergram.app.core.telegram.TelegramClientManager
 import com.supergram.app.domain.model.Chat
-import com.supergram.app.domain.model.ChatCategory
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.MediaKind
 import com.supergram.app.domain.model.Message
@@ -235,15 +234,11 @@ private fun ifErrorThrow(result: TdApi.Object) {
  * private/secret chats are checked against GetUser to detect bots.
  */
 suspend fun TdApi.Chat.toDomainChat(): Chat {
-    val category = when (type) {
-        is TdApi.ChatTypePrivate -> resolveUserCategory((type as TdApi.ChatTypePrivate).userId)
-        is TdApi.ChatTypeSecret -> ChatCategory.DIRECT
-        is TdApi.ChatTypeBasicGroup -> ChatCategory.GROUP
-        is TdApi.ChatTypeSupergroup ->
-            if ((type as TdApi.ChatTypeSupergroup).isChannel) ChatCategory.CHANNEL
-            else ChatCategory.GROUP
-        else -> ChatCategory.DIRECT
-    }
+    val privateType = type as? TdApi.ChatTypePrivate
+    val category = ChatCategoryResolver.resolve(
+        chatType = type,
+        isBot = privateType != null && isBotUser(privateType.userId),
+    )
     return Chat(
         id = id,
         title = title.orEmpty(),
@@ -256,12 +251,11 @@ suspend fun TdApi.Chat.toDomainChat(): Chat {
     )
 }
 
-/** DIRECT for regular users, BOT for bot accounts. */
-private suspend fun resolveUserCategory(userId: Long): ChatCategory =
+/** True when the Telegram user behind a private chat is a bot account. */
+private suspend fun isBotUser(userId: Long): Boolean =
     when (val user = TelegramClientManager.send(TdApi.GetUser(userId))) {
-        is TdApi.User ->
-            if (user.type is TdApi.UserTypeBot) ChatCategory.BOT else ChatCategory.DIRECT
-        else -> ChatCategory.DIRECT
+        is TdApi.User -> user.type is TdApi.UserTypeBot
+        else -> false
     }
 
 /** Maps a TDLib message to the domain [Message]. */
@@ -291,7 +285,10 @@ fun TdApi.MessageContent.toDomainMediaFile(): MediaFile? = when (this) {
     is TdApi.MessageVoiceNote -> {
         voiceNote.voice
             .toDomainMediaFile(MediaKind.VOICE, null)
-            ?.copy(durationSeconds = voiceNote.duration)
+            ?.copy(
+                durationSeconds = voiceNote.duration,
+                waveform = decodeWaveform(voiceNote.waveform),
+            )
             ?.also { fileDescriptors[it.fileId] = it }
     }
     else -> null

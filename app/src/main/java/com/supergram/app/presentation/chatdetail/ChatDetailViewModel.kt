@@ -66,8 +66,8 @@ class ChatDetailViewModel(
     val voiceState: StateFlow<com.supergram.app.core.audio.VoiceNotePlayer.PlaybackState> =
         voicePlayer.state
 
-    /** File id waiting for its download to finish so it can auto-play. */
-    private var pendingPlayFileId: Int? = null
+    /** Decides play vs download and auto-plays once a pending download completes. */
+    private val autoPlay = com.supergram.app.domain.usecase.VoiceAutoPlayController()
 
     init {
         // Chat lifecycle: open on enter (TDLib stream optimization).
@@ -101,11 +101,8 @@ class ChatDetailViewModel(
             .onEach { state ->
                 mediaStates.value = mediaStates.value + (state.fileId to state)
                 // Auto-play a voice note once its download completes.
-                val pending = pendingPlayFileId
-                if (pending != null && state.fileId == pending && state.isDownloaded) {
-                    val path = state.localPath
-                    pendingPlayFileId = null
-                    if (path != null) voicePlayer.play(pending, path)
+                autoPlay.onFileUpdated(state)?.let { path ->
+                    voicePlayer.play(state.fileId, path)
                 }
             }
             .launchIn(viewModelScope)
@@ -157,12 +154,11 @@ class ChatDetailViewModel(
      * the download starts and playback begins automatically once complete.
      */
     fun toggleVoice(media: MediaFile) {
-        val path = media.localPath
-        if (media.isDownloaded && path != null) {
-            voicePlayer.toggle(media.fileId, path)
-        } else {
-            pendingPlayFileId = media.fileId
-            downloadFile(media.fileId)
+        when (val action = autoPlay.onToggle(media)) {
+            is com.supergram.app.domain.usecase.VoiceAutoPlayController.Action.Play ->
+                voicePlayer.toggle(media.fileId, action.path)
+            is com.supergram.app.domain.usecase.VoiceAutoPlayController.Action.Download ->
+                downloadFile(action.fileId)
         }
     }
 

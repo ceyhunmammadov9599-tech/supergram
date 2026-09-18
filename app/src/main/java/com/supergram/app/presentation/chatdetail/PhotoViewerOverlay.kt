@@ -2,12 +2,11 @@ package com.supergram.app.presentation.chatdetail
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,13 +18,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -35,31 +31,44 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
-import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
 import com.supergram.app.R
 import com.supergram.app.domain.model.MediaFile
+import kotlinx.coroutines.launch
 
 /**
- * Full-screen photo viewer overlay with pinch-zoom and pan support,
- * plus a save-to-gallery action (MediaStore, permission-free on API 29+).
+ * Full-screen photo viewer overlay with pinch-zoom/pan,
+ * double-tap zoom (1x <-> 2.5x), swipe-to-dismiss at 1x zoom,
+ * and a save-to-gallery action (MediaStore, permission-free on API 29+).
  */
 @Composable
 fun PhotoViewerOverlay(
     media: MediaFile,
     onDismiss: () -> Unit,
 ) {
+    // Back gesture closes the viewer.
+    BackHandler(onBack = onDismiss)
+
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    // Back gesture closes the viewer.
-    androidx.activity.compose.BackHandler(onBack = onDismiss)
+    val scope = rememberCoroutineScope()
 
-    // Zoom / pan state
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offsetX by remember { mutableFloatStateOf(0f) }
-    var offsetY by remember { mutableFloatStateOf(0f) }
+    // Animated zoom / pan state
+    val scale = remember { Animatable(1f) }
+    val offsetX = remember { Animatable(0f) }
+    val offsetY = remember { Animatable(0f) }
 
     val bitmap = remember(media.localPath) {
         media.localPath?.let { BitmapFactory.decodeFile(it) }?.asImageBitmap()
+    }
+
+    fun resetZoom() {
+        scope.launch {
+            scale.animateTo(1f)
+            offsetX.animateTo(0f)
+            offsetY.animateTo(0f)
+        }
     }
 
     Surface(
@@ -69,12 +78,49 @@ fun PhotoViewerOverlay(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                // 1) Pinch-zoom + pan
                 .pointerInput(Unit) {
                     detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 6f)
-                        offsetX += pan.x
-                        offsetY += pan.y
+                        val newScale = (scale.value * zoom).coerceIn(1f, 6f)
+                        scope.launch {
+                            scale.snapTo(newScale)
+                            if (newScale > 1f) {
+                                offsetX.snapTo(offsetX.value + pan.x)
+                                offsetY.snapTo(offsetY.value + pan.y)
+                            }
+                        }
                     }
+                }
+                // 2) Double-tap zoom toggle: 1x <-> 2.5x
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            if (scale.value > 1.01f) {
+                                resetZoom()
+                            } else {
+                                scope.launch { scale.animateTo(2.5f) }
+                            }
+                        },
+                    )
+                }
+                // 3) Swipe-to-dismiss (only at 1x zoom)
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDrag = { _, drag ->
+                            if (scale.value <= 1.01f) {
+                                scope.launch { offsetY.snapTo(offsetY.value + drag.y) }
+                            }
+                        },
+                        onDragEnd = {
+                            if (scale.value <= 1.01f &&
+                                (offsetY.value > 350f || offsetY.value < -350f)
+                            ) {
+                                onDismiss()
+                            } else if (scale.value <= 1.01f) {
+                                scope.launch { offsetY.animateTo(0f) }
+                            }
+                        },
+                    )
                 },
             contentAlignment = Alignment.Center,
         ) {
@@ -86,10 +132,10 @@ fun PhotoViewerOverlay(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer(
-                            scaleX = scale,
-                            scaleY = scale,
-                            translationX = offsetX,
-                            translationY = offsetY,
+                            scaleX = scale.value,
+                            scaleY = scale.value,
+                            translationX = offsetX.value,
+                            translationY = offsetY.value,
                         ),
                 )
             } else {
@@ -118,10 +164,10 @@ fun PhotoViewerOverlay(
                     } else {
                         "Photo not downloaded"
                     }
-                    Toast.makeText(
+                    android.widget.Toast.makeText(
                         context,
                         result ?: "Saved to gallery",
-                        Toast.LENGTH_SHORT,
+                        android.widget.Toast.LENGTH_SHORT,
                     ).show()
                 },
             ) {

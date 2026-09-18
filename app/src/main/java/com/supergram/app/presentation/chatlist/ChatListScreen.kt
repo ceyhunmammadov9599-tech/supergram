@@ -43,6 +43,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.ChatCategory
+import com.supergram.app.domain.model.filterByCategory
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -74,8 +75,7 @@ fun ChatListScreen(
 
     // Reactive: re-evaluates on every live chats update.
     val visibleChats = remember(chats, selectedTab) {
-        val category = categories.getOrNull(selectedTab)
-        if (category == null) chats else chats.filter { it.category == category }
+        chats.filterByCategory(categories.getOrNull(selectedTab))
     }
 
     Scaffold(

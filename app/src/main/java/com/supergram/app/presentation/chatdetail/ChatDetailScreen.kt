@@ -1,6 +1,7 @@
 package com.supergram.app.presentation.chatdetail
 
 import android.graphics.BitmapFactory
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -42,7 +43,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -433,7 +438,7 @@ private fun VoiceBubble(
             )
         }
 
-        // Duration + progress
+        // Duration + waveform progress
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -444,9 +449,65 @@ private fun VoiceBubble(
                 ),
                 style = MaterialTheme.typography.labelMedium,
             )
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier.fillMaxWidth(),
+            val playedColor = if (isOutgoing) {
+                MaterialTheme.colorScheme.onPrimary
+            } else {
+                MaterialTheme.colorScheme.primary
+            }
+            val unplayedColor = if (isOutgoing) {
+                MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.45f)
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            val bars = media.waveform
+            if (bars != null) {
+                WaveformProgress(
+                    bars = bars,
+                    progress = progress,
+                    playedColor = playedColor,
+                    unplayedColor = unplayedColor,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp),
+                )
+            } else {
+                // Fallback when the waveform payload is unavailable.
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Custom waveform visualizer: dynamic amplitude bars split into
+ * played (position-progress) and unplayed portions.
+ */
+@Composable
+private fun WaveformProgress(
+    bars: List<Float>,
+    progress: Float,
+    playedColor: Color,
+    unplayedColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        if (bars.isEmpty()) return@Canvas
+        val gap = 2.dp.toPx()
+        val barWidth = ((size.width - gap * (bars.size - 1)) / bars.size)
+            .coerceAtLeast(1f)
+        val playedX = size.width * progress
+        bars.forEachIndexed { index, amplitude ->
+            val x = index * (barWidth + gap)
+            val barHeight = size.height * amplitude.coerceIn(0.05f, 1f)
+            val color = if (x + barWidth / 2f <= playedX) playedColor else unplayedColor
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x, (size.height - barHeight) / 2f),
+                size = Size(barWidth, barHeight),
+                cornerRadius = CornerRadius(barWidth / 2f),
             )
         }
     }
