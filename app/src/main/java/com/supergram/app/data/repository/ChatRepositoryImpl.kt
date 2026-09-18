@@ -275,7 +275,7 @@ fun TdApi.Message.toDomainMessage(): Message = Message(
     media = content.toDomainMediaFile(),
 )
 
-/** Extracts the download state of a photo/document attachment, if any. */
+/** Extracts the download state of a photo/document/voice attachment, if any. */
 fun TdApi.MessageContent.toDomainMediaFile(): MediaFile? = when (this) {
     is TdApi.MessagePhoto -> {
         val size = photo.sizes.orEmpty().maxByOrNull { it.width }
@@ -286,6 +286,12 @@ fun TdApi.MessageContent.toDomainMediaFile(): MediaFile? = when (this) {
     is TdApi.MessageDocument -> {
         document.document
             .toDomainMediaFile(MediaKind.DOCUMENT, document.fileName)
+            ?.also { fileDescriptors[it.fileId] = it }
+    }
+    is TdApi.MessageVoiceNote -> {
+        voiceNote.voice
+            .toDomainMediaFile(MediaKind.VOICE, null)
+            ?.copy(durationSeconds = voiceNote.duration)
             ?.also { fileDescriptors[it.fileId] = it }
     }
     else -> null

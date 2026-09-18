@@ -32,6 +32,7 @@ class ChatDetailViewModel(
     private val viewMessages: com.supergram.app.domain.usecase.ViewMessagesUseCase,
     private val downloadFileUseCase: com.supergram.app.domain.usecase.DownloadFileUseCase,
     observeFileUpdates: com.supergram.app.domain.usecase.ObserveFileUpdatesUseCase,
+    private val voicePlayer: com.supergram.app.core.audio.VoiceNotePlayer,
 ) : ViewModel() {
 
     /** Newest messages first (as returned by TDLib); UI reverses for display. */
@@ -60,6 +61,13 @@ class ChatDetailViewModel(
 
     private val _sending = MutableStateFlow(false)
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
+
+    /** Live voice note playback state (active file, progress). */
+    val voiceState: StateFlow<com.supergram.app.core.audio.VoiceNotePlayer.PlaybackState> =
+        voicePlayer.state
+
+    /** File id waiting for its download to finish so it can auto-play. */
+    private var pendingPlayFileId: Int? = null
 
     init {
         // Chat lifecycle: open on enter (TDLib stream optimization).
@@ -90,7 +98,16 @@ class ChatDetailViewModel(
 
         // Live file download progress.
         observeFileUpdates()
-            .onEach { state -> mediaStates.value = mediaStates.value + (state.fileId to state) }
+            .onEach { state ->
+                mediaStates.value = mediaStates.value + (state.fileId to state)
+                // Auto-play a voice note once its download completes.
+                val pending = pendingPlayFileId
+                if (pending != null && state.fileId == pending && state.isDownloaded) {
+                    val path = state.localPath
+                    pendingPlayFileId = null
+                    if (path != null) voicePlayer.play(pending, path)
+                }
+            }
             .launchIn(viewModelScope)
     }
 
@@ -135,6 +152,20 @@ class ChatDetailViewModel(
         }
     }
 
+    /**
+     * Play/pause toggle for a voice note. If the file is not downloaded yet,
+     * the download starts and playback begins automatically once complete.
+     */
+    fun toggleVoice(media: MediaFile) {
+        val path = media.localPath
+        if (media.isDownloaded && path != null) {
+            voicePlayer.toggle(media.fileId, path)
+        } else {
+            pendingPlayFileId = media.fileId
+            downloadFile(media.fileId)
+        }
+    }
+
     fun dismissError() {
         _error.value = null
     }
@@ -147,6 +178,7 @@ class ChatDetailViewModel(
     override fun onCleared() {
         // Chat lifecycle: close on exit (viewModelScope is already cancelled).
         lifecycleScope.launch { closeChat(chatId) }
+        voicePlayer.stopPlayback()
         super.onCleared()
     }
 
@@ -161,6 +193,7 @@ class ChatDetailViewModel(
             AppContainer.viewMessages,
             AppContainer.downloadFile,
             AppContainer.observeFileUpdates,
+            AppContainer.voicePlayer,
         )
     }
 }

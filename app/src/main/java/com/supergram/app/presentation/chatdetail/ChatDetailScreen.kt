@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.supergram.app.R
+import com.supergram.app.core.audio.VoiceNotePlayer
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.MediaKind
 import com.supergram.app.domain.model.Message
@@ -57,7 +59,7 @@ import java.util.Locale
 
 /**
  * Material 3 chat detail screen: live message stream, media previews with a
- * download flow, and an input bar dispatching plain-text messages.
+ * download flow, voice note playback, and a full-screen photo viewer.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,9 +71,13 @@ fun ChatDetailScreen(
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val sending by viewModel.sending.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
+    val voiceState by viewModel.voiceState.collectAsStateWithLifecycle()
 
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+
+    // Full-screen photo viewer target.
+    var viewerMedia by remember { mutableStateOf<MediaFile?>(null) }
 
     // Newest at the bottom; auto-scroll when a message arrives.
     val displayList = remember(messages) { messages.asReversed() }
@@ -79,100 +85,119 @@ fun ChatDetailScreen(
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(chatTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(chatTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                )
+            },
+            bottomBar = {
+                Column(Modifier.imePadding()) {
+                    error?.let { message ->
+                        Text(
+                            text = message,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                        )
                     }
-                },
-            )
-        },
-        bottomBar = {
-            Column(Modifier.imePadding()) {
-                error?.let { message ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = input,
+                            onValueChange = { input = it },
+                            placeholder = { Text("Message") },
+                            modifier = Modifier.weight(1f),
+                            maxLines = 4,
+                        )
+                        IconButton(
+                            onClick = {
+                                val text = input
+                                input = ""
+                                viewModel.send(text)
+                            },
+                            enabled = input.isNotBlank() && !sending,
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Send",
+                                tint = if (input.isNotBlank()) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                    }
+                }
+            },
+        ) { padding ->
+            if (messages.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(padding),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Text(
-                        text = message,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                        "No messages yet",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Row(
+            } else {
+                LazyColumn(
+                    state = listState,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .fillMaxSize()
+                        .padding(padding),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 12.dp,
+                        vertical = 8.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    OutlinedTextField(
-                        value = input,
-                        onValueChange = { input = it },
-                        placeholder = { Text("Message") },
-                        modifier = Modifier.weight(1f),
-                        maxLines = 4,
-                    )
-                    IconButton(
-                        onClick = {
-                            val text = input
-                            input = ""
-                            viewModel.send(text)
-                        },
-                        enabled = input.isNotBlank() && !sending,
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Send",
-                            tint = if (input.isNotBlank()) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
+                    items(displayList, key = { it.id }) { message ->
+                        MessageBubble(
+                            message = message,
+                            voiceState = voiceState,
+                            onDownload = viewModel::downloadFile,
+                            onToggleVoice = viewModel::toggleVoice,
+                            onOpenPhoto = { viewerMedia = it },
                         )
                     }
                 }
             }
-        },
-    ) { padding ->
-        if (messages.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "No messages yet",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 12.dp,
-                    vertical = 8.dp,
-                ),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                items(displayList, key = { it.id }) { message ->
-                    MessageBubble(
-                        message = message,
-                        onDownload = viewModel::downloadFile,
-                    )
-                }
-            }
+        }
+
+        // Full-screen photo viewer overlay.
+        viewerMedia?.let { media ->
+            PhotoViewerOverlay(
+                media = media,
+                onDismiss = { viewerMedia = null },
+            )
         }
     }
 }
 
 @Composable
-private fun MessageBubble(message: Message, onDownload: (Int) -> Unit) {
+private fun MessageBubble(
+    message: Message,
+    voiceState: VoiceNotePlayer.PlaybackState,
+    onDownload: (Int) -> Unit,
+    onToggleVoice: (MediaFile) -> Unit,
+    onOpenPhoto: (MediaFile) -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.isOutgoing) {
@@ -197,8 +222,18 @@ private fun MessageBubble(message: Message, onDownload: (Int) -> Unit) {
             modifier = Modifier.widthIn(max = 300.dp),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                message.media?.let { media -> MediaPreview(media, isOutgoing = message.isOutgoing, onDownload = onDownload) }
-                if (message.text.isNotBlank()) {
+                message.media?.let { media ->
+                    MediaPreview(
+                        media = media,
+                        isOutgoing = message.isOutgoing,
+                        voiceState = voiceState,
+                        onDownload = onDownload,
+                        onToggleVoice = onToggleVoice,
+                        onOpenPhoto = onOpenPhoto,
+                    )
+                }
+                // Voice notes render their own bubble; skip the snippet text.
+                if (message.text.isNotBlank() && message.media?.kind != MediaKind.VOICE) {
                     Text(
                         text = message.text,
                         style = MaterialTheme.typography.bodyMedium,
@@ -224,22 +259,34 @@ private fun MessageBubble(message: Message, onDownload: (Int) -> Unit) {
     }
 }
 
-/** Photo / document preview with download-state placeholders. */
+/** Photo / document / voice preview dispatch with download-state placeholders. */
 @Composable
-private fun MediaPreview(media: MediaFile, isOutgoing: Boolean, onDownload: (Int) -> Unit) {
+private fun MediaPreview(
+    media: MediaFile,
+    isOutgoing: Boolean,
+    voiceState: VoiceNotePlayer.PlaybackState,
+    onDownload: (Int) -> Unit,
+    onToggleVoice: (MediaFile) -> Unit,
+    onOpenPhoto: (MediaFile) -> Unit,
+) {
     when (media.kind) {
-        MediaKind.PHOTO -> PhotoPreview(media, onDownload)
+        MediaKind.PHOTO -> PhotoPreview(media, onDownload, onOpenPhoto)
         MediaKind.DOCUMENT -> DocumentPreview(media, onDownload, isOutgoing = isOutgoing)
+        MediaKind.VOICE -> VoiceBubble(media, voiceState, isOutgoing = isOutgoing, onToggle = onToggleVoice)
     }
 }
 
 @Composable
-private fun PhotoPreview(media: MediaFile, onDownload: (Int) -> Unit) {
+private fun PhotoPreview(
+    media: MediaFile,
+    onDownload: (Int) -> Unit,
+    onOpenPhoto: (MediaFile) -> Unit,
+) {
     val bitmap = remember(media.localPath) {
         media.localPath?.let { BitmapFactory.decodeFile(it) }?.asImageBitmap()
     }
     if (bitmap != null && media.isDownloaded) {
-        // Downloaded photo: render the decoded image.
+        // Downloaded photo: tap opens the full-screen zoomable viewer.
         Image(
             bitmap = bitmap,
             contentDescription = "Photo",
@@ -247,7 +294,8 @@ private fun PhotoPreview(media: MediaFile, onDownload: (Int) -> Unit) {
             modifier = Modifier
                 .padding(vertical = 2.dp)
                 .fillMaxWidth()
-                .height(200.dp),
+                .height(200.dp)
+                .clickable { onOpenPhoto(media) },
         )
     } else {
         // Downloading / not started: placeholder with live progress.
@@ -334,6 +382,80 @@ private fun DocumentPreview(media: MediaFile, onDownload: (Int) -> Unit, isOutgo
             )
         }
     }
+}
+
+/** Custom voice note bubble: play/pause toggle, duration label, progress. */
+@Composable
+private fun VoiceBubble(
+    media: MediaFile,
+    voiceState: VoiceNotePlayer.PlaybackState,
+    isOutgoing: Boolean,
+    onToggle: (MediaFile) -> Unit,
+) {
+    val isThisPlaying = voiceState.fileId == media.fileId && voiceState.isPlaying
+    val durationMs = media.durationSeconds?.times(1000) ?: voiceState.durationMs
+    val positionMs = if (voiceState.fileId == media.fileId) voiceState.positionMs else 0
+    val progress = if (durationMs > 0) {
+        (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+    } else 0f
+
+    Row(
+        modifier = Modifier
+            .padding(vertical = 2.dp)
+            .fillMaxWidth()
+            .clickable { onToggle(media) },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // Play / pause toggle
+        Surface(
+            shape = CircleShape,
+            color = if (isOutgoing) {
+                MaterialTheme.colorScheme.onPrimary
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
+            modifier = Modifier.size(36.dp),
+        ) {
+            Icon(
+                painter = if (isThisPlaying) {
+                    painterResource(R.drawable.ic_pause)
+                } else {
+                    painterResource(R.drawable.ic_play)
+                },
+                contentDescription = if (isThisPlaying) "Pause" else "Play",
+                tint = if (isOutgoing) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onPrimary
+                },
+                modifier = Modifier.size(24.dp),
+            )
+        }
+
+        // Duration + progress
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = formatDuration(
+                    if (isThisPlaying) (positionMs / 1000) else (media.durationSeconds ?: durationMs / 1000)
+                ),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+private fun formatDuration(seconds: Int): String {
+    val m = seconds / 60
+    val s = seconds % 60
+    return "%d:%02d".format(m, s)
 }
 
 private fun formatSize(bytes: Long): String = when {

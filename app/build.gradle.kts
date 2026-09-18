@@ -30,12 +30,40 @@ android {
         applicationId = "com.supergram.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
 
         // Exposed to the app through BuildConfig
         buildConfigField("int", "TELEGRAM_API_ID", telegramApiId.toString())
         buildConfigField("String", "TELEGRAM_API_HASH", "\"$telegramApiHash\"")
+    }
+
+    // Modular release signing: keystore.properties (git-ignored) or environment
+    // variables — never hardcoded, never committed.
+    val keystoreProps = Properties().apply {
+        val f = rootProject.file("keystore.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+    val releaseStoreFile = keystoreProps.getProperty("storeFile")
+        ?: System.getenv("SUPERGRAM_STORE_FILE")
+    val releaseStorePassword = keystoreProps.getProperty("storePassword")
+        ?: System.getenv("SUPERGRAM_STORE_PASSWORD")
+    val releaseKeyAlias = keystoreProps.getProperty("keyAlias")
+        ?: System.getenv("SUPERGRAM_KEY_ALIAS")
+    val releaseKeyPassword = keystoreProps.getProperty("keyPassword")
+        ?: System.getenv("SUPERGRAM_KEY_PASSWORD")
+    val hasReleaseSigning = releaseStoreFile != null && releaseStorePassword != null &&
+        releaseKeyAlias != null && releaseKeyPassword != null
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -44,10 +72,13 @@ android {
         }
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Null when no keystore is configured -> unsigned release APK.
+            signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
         }
     }
 

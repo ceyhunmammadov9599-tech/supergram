@@ -25,3 +25,7 @@ captures/
 .DS_Store
 *.log
 *.zip
+
+keystore.properties
+*.jks
+*.keystore

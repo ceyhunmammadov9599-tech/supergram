@@ -1,5 +1,6 @@
 package com.supergram.app.di
 
+import com.supergram.app.core.audio.VoiceNotePlayer
 import com.supergram.app.core.telegram.TelegramClientManager
 import com.supergram.app.data.repository.ChatRepositoryImpl
 import com.supergram.app.data.repository.TelegramAuthRepositoryImpl
@@ -28,6 +29,9 @@ object AppContainer {
 
     val telegramClientManager: TelegramClientManager
         get() = TelegramClientManager
+
+    /** App-scoped voice note playback engine (native MediaPlayer). */
+    val voicePlayer: VoiceNotePlayer by lazy { VoiceNotePlayer() }
 
     val authRepository: TelegramAuthRepository by lazy {
         TelegramAuthRepositoryImpl(telegramClientManager)
