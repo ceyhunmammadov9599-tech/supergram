@@ -40,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,6 +89,11 @@ fun ChatDetailScreen(
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
     val scrollTarget by viewModel.scrollTarget.collectAsStateWithLifecycle()
+    val hasOlder by viewModel.hasOlder.collectAsStateWithLifecycle()
+    val hasNewer by viewModel.hasNewer.collectAsStateWithLifecycle()
+    val historyLoading by viewModel.historyLoading.collectAsStateWithLifecycle()
+    val prependCount by viewModel.prependCount.collectAsStateWithLifecycle()
+    val searchPaginator by viewModel.searchPaginator.collectAsStateWithLifecycle()
 
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -97,8 +103,74 @@ fun ChatDetailScreen(
 
     // Newest at the bottom; auto-scroll when a message arrives.
     val displayList = remember(messages) { messages.asReversed() }
+
+    // Bidirectional paging triggers:
+    //  - near the TOP -> page in older messages
+    //  - near the BOTTOM (after a jump) -> page in newer messages
+    val shouldLoadOlder by remember {
+        derivedStateOf {
+            listState.layoutInfo.totalItemsCount > 0 &&
+                (listState.firstVisibleItemIndex <= 3 || listState.layoutInfo.visibleItemsInfo.size <= 3)
+        }
+    }
+    val shouldLoadNewer by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 4
+        }
+    }
+
+    // Scroll anchor captured right before an older page is requested; the
+    // first visible item's id + its pixel offset lets us restore the exact
+    // viewport after the page is prepended.
+    var anchorMessageId by remember { mutableStateOf<Long?>(null) }
+    var anchorScrollOffset by remember { mutableStateOf(0) }
+    var handledPrepends by remember { mutableStateOf(0) }
+
+    LaunchedEffect(shouldLoadOlder) {
+        if (shouldLoadOlder && !historyLoading && hasOlder) {
+            anchorMessageId = displayList.getOrNull(listState.firstVisibleItemIndex)?.id
+            anchorScrollOffset = listState.firstVisibleItemScrollOffset
+            viewModel.loadMore()
+        }
+    }
+    LaunchedEffect(shouldLoadNewer) {
+        if (shouldLoadNewer && !historyLoading && hasNewer) {
+            viewModel.loadNewer()
+        }
+    }
+
+    // After a prepend (older page merged in above), restore the viewport so
+    // the user's current message stays pinned instead of the list jumping.
+    LaunchedEffect(prependCount) {
+        if (prependCount > handledPrepends) {
+            handledPrepends = prependCount
+            val key = anchorMessageId
+            if (key != null) {
+                val index = displayList.indexOfFirst { it.id == key }
+                if (index >= 0) listState.scrollToItem(index, anchorScrollOffset)
+            }
+            anchorMessageId = null
+        }
+    }
+
+    // Auto-scroll behavior: on first load go to the newest message; while the
+    // user is at the bottom, follow new arrivals; never fight the pager above.
+    var initialScrollDone by remember { mutableStateOf(false) }
+    val nearBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 3
+        }
+    }
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty() && scrollTarget == null) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        if (!initialScrollDone && scrollTarget == null) {
+            listState.animateScrollToItem(messages.size - 1)
+            initialScrollDone = true
+        } else if (nearBottom && scrollTarget == null) {
             listState.animateScrollToItem(messages.size - 1)
         }
     }
@@ -219,7 +291,19 @@ fun ChatDetailScreen(
                         )
                     }
                 } else {
+                    val searchListState = androidx.compose.foundation.lazy.rememberLazyListState()
+                    val loadMoreResults by remember {
+                        derivedStateOf {
+                            val info = searchListState.layoutInfo
+                            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+                            info.totalItemsCount > 0 && last >= info.totalItemsCount - 5
+                        }
+                    }
+                    LaunchedEffect(loadMoreResults, searchResults.size) {
+                        if (loadMoreResults) viewModel.loadMoreSearch()
+                    }
                     LazyColumn(
+                        state = searchListState,
                         modifier = Modifier.fillMaxSize().padding(padding),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -234,6 +318,19 @@ fun ChatDetailScreen(
                                     viewModel.jumpToMessage(result)
                                 },
                             )
+                        }
+                        if (searchPaginator.loadingMore) {
+                            item(key = "sr_footer") {
+                                androidx.compose.foundation.layout.Box(
+                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(24.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                }
+                            }
                         }
                     }
                 }

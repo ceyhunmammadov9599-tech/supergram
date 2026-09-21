@@ -3,7 +3,7 @@ package com.supergram.app.domain.repository
 import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.Message
-import com.supergram.app.domain.model.SearchResult
+import com.supergram.app.domain.model.SearchPage
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -23,8 +23,19 @@ interface ChatRepository {
     /** Loads the chat list from TDLib and publishes it into [chats]. */
     suspend fun loadChats(limit: Int): Result<Unit>
 
-    /** Loads a page of chat history. Returns messages newest-first. */
-    suspend fun loadHistory(chatId: Long, fromMessageId: Long, limit: Int): Result<List<Message>>
+    /**
+     * Loads a page of chat history. Returns messages newest-first.
+     *
+     * @param fromMessageId Fetch messages older than this id (0 = newest).
+     * @param offset TDLib pagination offset: 0 = from exactly [fromMessageId]
+     * (older), a negative value (>= -99) additionally returns newer messages.
+     */
+    suspend fun loadHistory(
+        chatId: Long,
+        fromMessageId: Long,
+        limit: Int,
+        offset: Int = 0,
+    ): Result<List<Message>>
 
     /** Sends a plain-text message. */
     suspend fun sendMessage(chatId: Long, text: String): Result<Unit>
@@ -41,9 +52,24 @@ interface ChatRepository {
     /** Starts (or resumes) downloading a file; progress arrives via [fileUpdates]. */
     suspend fun downloadFile(fileId: Int): Result<Unit>
 
-    /** Searches messages inside a chat (TdApi.SearchChatMessages). */
-    suspend fun searchChatMessages(chatId: Long, query: String, limit: Int = 20): Result<List<SearchResult>>
+    /**
+     * Searches messages inside a chat (TdApi.SearchChatMessages).
+     * Pages via the [SearchPage.nextFromMessageId] cursor (FoundChatMessages).
+     */
+    suspend fun searchChatMessages(
+        chatId: Long,
+        query: String,
+        limit: Int = 20,
+        fromMessageId: Long = 0,
+    ): Result<SearchPage>
 
-    /** Global cross-chat message search (TdApi.SearchMessages). */
-    suspend fun searchMessages(query: String, limit: Int = 20): Result<List<SearchResult>>
+    /**
+     * Global cross-chat message search (TdApi.SearchMessages).
+     * Pages via the [SearchPage.nextOffset] string cursor (FoundMessages).
+     */
+    suspend fun searchMessages(
+        query: String,
+        limit: Int = 20,
+        offset: String = "",
+    ): Result<SearchPage>
 }

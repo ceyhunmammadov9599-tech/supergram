@@ -4,16 +4,19 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.supergram.app.di.AppContainer
 import com.supergram.app.domain.model.Chat
-import com.supergram.app.domain.model.SearchResult
+import com.supergram.app.domain.model.SearchPage
+import com.supergram.app.domain.model.SearchPaginator
 import com.supergram.app.domain.usecase.searchDebounce
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.launch
 
 /**
@@ -45,18 +48,51 @@ class ChatListViewModel(
     private val _searchActive = MutableStateFlow(false)
     val searchActive: StateFlow<Boolean> = _searchActive.asStateFlow()
 
-    /** Global cross-chat results, refreshed from the debounced query (300 ms). */
-    val searchResults: StateFlow<List<SearchResult>> =
+    /** Paged global-search state: accumulated results + TDLib offset cursor. */
+    private val _paginator = MutableStateFlow(SearchPaginator())
+    val paginator: StateFlow<SearchPaginator> = _paginator.asStateFlow()
+
+    /** Global cross-chat results, derived from the paged paginator state. */
+    val searchResults: StateFlow<List<com.supergram.app.domain.model.SearchResult>> =
+        _paginator
+            .map { it.results }
+            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    init {
+        // Debounced query -> reset the paginator and fetch the first page.
         _searchQuery
             .searchDebounce()
-            .flatMapLatest { query ->
-                flow {
-                    searchMessages(query)
-                        .onSuccess { emit(it) }
-                        .onFailure { emit(emptyList()) }
-                }
+            .onEach { query ->
+                _paginator.value = SearchPaginator.start(query)
+                if (query.isNotBlank()) loadSearchPage()
             }
-            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+            .launchIn(viewModelScope)
+    }
+
+    /**
+     * Loads the next global-search page from the paginator cursor.
+     * Guarded by hasMore + loadingMore so the list can call it freely on
+     * its load-more trigger without duplicating requests.
+     */
+    fun loadMoreSearch() {
+        val state = _paginator.value
+        if (state.query.isBlank() || !state.hasMore || state.loadingMore) return
+        _searchJob?.cancel()
+        _searchJob = viewModelScope.launch { loadSearchPage() }
+    }
+
+    private var _searchJob: Job? = null
+
+    private suspend fun loadSearchPage() {
+        val state = _paginator.value
+        if (!state.hasMore || state.loadingMore) return
+        _paginator.value = state.beginLoadingMore()
+        searchMessages(state.query, offset = state.nextOffset ?: "")
+            .fold(
+                onSuccess = { page: SearchPage -> _paginator.value = _paginator.value.appendGlobalPage(page) },
+                onFailure = { _paginator.value = _paginator.value.loadFailed() },
+            )
+    }
 
     fun setQuery(query: String) {
         _searchQuery.value = query
@@ -64,12 +100,16 @@ class ChatListViewModel(
 
     fun toggleSearch() {
         _searchActive.value = !_searchActive.value
-        if (!_searchActive.value) _searchQuery.value = ""
+        if (!_searchActive.value) {
+            _searchQuery.value = ""
+            _paginator.value = SearchPaginator()
+        }
     }
 
     fun closeSearch() {
         _searchActive.value = false
         _searchQuery.value = ""
+        _paginator.value = SearchPaginator()
     }
 
     init {

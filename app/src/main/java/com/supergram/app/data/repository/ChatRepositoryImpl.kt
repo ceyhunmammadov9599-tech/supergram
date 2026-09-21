@@ -5,7 +5,7 @@ import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.MediaKind
 import com.supergram.app.domain.model.Message
-import com.supergram.app.domain.model.SearchResult
+import com.supergram.app.domain.model.SearchPage
 import com.supergram.app.domain.repository.ChatRepository
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -78,11 +78,12 @@ class ChatRepositoryImpl(
         chatId: Long,
         fromMessageId: Long,
         limit: Int,
+        offset: Int,
     ): Result<List<Message>> = runCatching {
         val request = TdApi.GetChatHistory().apply {
             this.chatId = chatId
             this.fromMessageId = fromMessageId
-            offset = 0
+            this.offset = offset.coerceIn(-99, 0)
             this.limit = limit
             onlyLocal = false
         }
@@ -126,58 +127,60 @@ class ChatRepositoryImpl(
         chatId: Long,
         query: String,
         limit: Int,
-    ): Result<List<SearchResult>> {
+        fromMessageId: Long,
+    ): Result<SearchPage> = runCatching {
         val request = TdApi.SearchChatMessages().apply {
             this.chatId = chatId
             this.query = query
             this.limit = limit
             offset = 0
-            fromMessageId = 0
+            this.fromMessageId = fromMessageId
         }
-        return when (val result = TelegramClientManager.send(request)) {
-            is TdApi.Messages -> {
-                val title = resolveChatTitle(chatId)
-                Result.success(
-                    result.messages.orEmpty().map { message ->
-                        message.toSearchResult(title, resolveSenderName(message.senderId))
-                    },
-                )
-            }
-            else -> Result.failure(IllegalStateException("Chat search failed"))
-        }
+        val result = clientManager.send(request)
+        ifErrorThrow(result)
+        val found = result as TdApi.FoundChatMessages
+        val title = resolveChatTitle(chatId)
+        SearchPage(
+            results = found.messages.orEmpty().map { message ->
+                message.toSearchResult(title, resolveSenderName(message.senderId))
+            },
+            nextOffset = null,
+            nextFromMessageId = found.nextFromMessageId.takeIf { it > 0 },
+        )
     }
 
     override suspend fun searchMessages(
         query: String,
         limit: Int,
-    ): Result<List<SearchResult>> {
+        offset: String,
+    ): Result<SearchPage> = runCatching {
         val request = TdApi.SearchMessages().apply {
             chatList = TdApi.ChatListMain()
             this.query = query
-            offset = ""
+            this.offset = offset
             this.limit = limit
         }
-        return when (val result = TelegramClientManager.send(request)) {
-            is TdApi.FoundMessages -> {
-                val messages = result.messages.orEmpty()
-                val titles = messages.map { it.chatId }.distinct()
-                    .associateWith { resolveChatTitle(it) }
-                val senders = messages
-                    .mapNotNull { it.senderId as? TdApi.MessageSenderUser }
-                    .map { it.userId }.distinct()
-                    .associateWith { resolveUserName(it) }
-                Result.success(
-                    messages.map { message ->
-                        message.toSearchResult(
-                            chatTitle = titles[message.chatId] ?: "Chat",
-                            senderName = (message.senderId as? TdApi.MessageSenderUser)
-                                ?.let { senders[it.userId] },
-                        )
-                    },
+        val result = clientManager.send(request)
+        ifErrorThrow(result)
+        val found = result as TdApi.FoundMessages
+        val messages = found.messages.orEmpty()
+        val titles = messages.map { it.chatId }.distinct()
+            .associateWith { resolveChatTitle(it) }
+        val senders = messages
+            .mapNotNull { it.senderId as? TdApi.MessageSenderUser }
+            .map { it.userId }.distinct()
+            .associateWith { resolveUserName(it) }
+        SearchPage(
+            results = messages.map { message ->
+                message.toSearchResult(
+                    chatTitle = titles[message.chatId] ?: "Chat",
+                    senderName = (message.senderId as? TdApi.MessageSenderUser)
+                        ?.let { senders[it.userId] },
                 )
-            }
-            else -> Result.failure(IllegalStateException("Global search failed"))
-        }
+            },
+            nextOffset = found.nextOffset.takeIf { it.isNotBlank() },
+            nextFromMessageId = null,
+        )
     }
 
     /** Chat display title via GetChat (fallback to a generic label). */

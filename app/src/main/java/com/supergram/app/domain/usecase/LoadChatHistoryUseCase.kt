@@ -9,5 +9,6 @@ class LoadChatHistoryUseCase(private val repository: ChatRepository) {
         chatId: Long,
         fromMessageId: Long = 0,
         limit: Int = 50,
-    ): Result<List<Message>> = repository.loadHistory(chatId, fromMessageId, limit)
+        offset: Int = 0,
+    ): Result<List<Message>> = repository.loadHistory(chatId, fromMessageId, limit, offset)
 }

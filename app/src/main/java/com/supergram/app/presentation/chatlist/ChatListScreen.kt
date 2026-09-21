@@ -69,6 +69,21 @@ fun ChatListScreen(
     val searchActive by viewModel.searchActive.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val searchLoadingMore by viewModel.paginator.collectAsStateWithLifecycle()
+
+    val searchListState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    // Infinite scroll: trigger the next page when the bottom comes close.
+    val shouldLoadMore by androidx.compose.runtime.remember {
+        androidx.compose.runtime.derivedStateOf {
+            val info = searchListState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 5
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(shouldLoadMore, searchResults.size) {
+        if (shouldLoadMore && searchActive) viewModel.loadMoreSearch()
+    }
 
     // Category filter tabs (All / Direct / Groups / Channels / Bots).
     val categories = listOf(
@@ -147,6 +162,7 @@ fun ChatListScreen(
                     }
                 } else {
                     LazyColumn(
+                        state = searchListState,
                         modifier = Modifier.fillMaxWidth().weight(1f),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                         verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
@@ -161,6 +177,19 @@ fun ChatListScreen(
                                     onChatClick(result.chatId, result.messageId)
                                 },
                             )
+                        }
+                        if (searchLoadingMore.loadingMore) {
+                            item(key = "search_footer") {
+                                androidx.compose.foundation.layout.Box(
+                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(24.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                }
+                            }
                         }
                     }
                 }

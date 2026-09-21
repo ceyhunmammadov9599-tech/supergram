@@ -1,12 +1,16 @@
 package com.supergram.app.domain.usecase
 
-import com.supergram.app.domain.model.SearchResult
+import com.supergram.app.domain.model.SearchPage
 import com.supergram.app.domain.repository.ChatRepository
 
-/** Global cross-chat message search (TdApi.SearchMessages). */
+/**
+ * Global cross-chat message search (TdApi.SearchMessages).
+ * Paged: pass the previous page's nextOffset as [offset].
+ */
 class SearchMessagesUseCase(private val repository: ChatRepository) {
     suspend operator fun invoke(
         query: String,
         limit: Int = 20,
-    ): Result<List<SearchResult>> = repository.searchMessages(query, limit)
+        offset: String = "",
+    ): Result<SearchPage> = repository.searchMessages(query, limit, offset)
 }

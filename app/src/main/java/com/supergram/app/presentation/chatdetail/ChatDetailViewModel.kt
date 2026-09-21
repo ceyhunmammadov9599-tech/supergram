@@ -5,7 +5,13 @@ import androidx.lifecycle.viewModelScope
 import com.supergram.app.di.AppContainer
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.Message
+import com.supergram.app.domain.model.SearchPage
+import com.supergram.app.domain.model.SearchPaginator
 import com.supergram.app.domain.model.SearchResult
+import com.supergram.app.domain.model.mergeMessages
+import com.supergram.app.domain.model.newestMessageId
+import com.supergram.app.domain.model.oldestMessageId
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +23,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -87,22 +94,72 @@ class ChatDetailViewModel(
     private val _searchActive = MutableStateFlow(false)
     val searchActive: StateFlow<Boolean> = _searchActive.asStateFlow()
 
-    /** In-chat search results, refreshed reactively from the debounced query. */
+    /** Paged in-chat search state: accumulated results + nextFromMessageId cursor. */
+    private val _paginator = MutableStateFlow(SearchPaginator())
+    val searchPaginator: StateFlow<SearchPaginator> = _paginator.asStateFlow()
+
+    /** In-chat search results, derived from the paged paginator state. */
     val searchResults: StateFlow<List<SearchResult>> =
+        _paginator
+            .map { it.results }
+            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    init {
+        // Debounced query -> reset the paginator and fetch the first page.
         _searchQuery
             .searchDebounce()
-            .flatMapLatest { query ->
-                flow {
-                    searchChatMessages(chatId, query)
-                        .onSuccess { emit(it) }
-                        .onFailure { emit(emptyList()) }
-                }
+            .onEach { query ->
+                _paginator.value = SearchPaginator.start(query)
+                if (query.isNotBlank()) loadSearchPage()
             }
-            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+            .launchIn(viewModelScope)
+    }
+
+    /** Loads the next in-chat search page from the paginator cursor. */
+    fun loadMoreSearch() {
+        val state = _paginator.value
+        if (state.query.isBlank() || !state.hasMore || state.loadingMore) return
+        viewModelScope.launch { loadSearchPage() }
+    }
+
+    private suspend fun loadSearchPage() {
+        val state = _paginator.value
+        if (!state.hasMore || state.loadingMore) return
+        _paginator.value = state.beginLoadingMore()
+        searchChatMessages(chatId, state.query, fromMessageId = state.nextFromMessageId ?: 0L)
+            .fold(
+                onSuccess = { page: SearchPage -> _paginator.value = _paginator.value.appendChatPage(page) },
+                onFailure = { _paginator.value = _paginator.value.loadFailed() },
+            )
+    }
 
     /** Message id the UI should scroll to (jump-to-result), or null. */
     private val _scrollTarget = MutableStateFlow<Long?>(null)
     val scrollTarget: StateFlow<Long?> = _scrollTarget.asStateFlow()
+
+    // ------------------------- Bidirectional paging -------------------------
+
+    /** True while older messages can still be requested. */
+    private val _hasOlder = MutableStateFlow(true)
+    val hasOlder: StateFlow<Boolean> = _hasOlder.asStateFlow()
+
+    /**
+     * True while newer messages exist outside the loaded window (typical
+     * after jumping deep into history). Scrolling to the bottom pages them in.
+     */
+    private val _hasNewer = MutableStateFlow(false)
+    val hasNewer: StateFlow<Boolean> = _hasNewer.asStateFlow()
+
+    /** True while a page request is in flight (guards list triggers). */
+    private val _historyLoading = MutableStateFlow(false)
+    val historyLoading: StateFlow<Boolean> = _historyLoading.asStateFlow()
+
+    /** Count of older messages prepended by the last loadMore (scroll-anchor signal). */
+    private val _prependCount = MutableStateFlow(0)
+    val prependCount: StateFlow<Int> = _prependCount.asStateFlow()
+
+    /** Page size for both directions. */
+    private val pageSize = 50
 
     init {
         // Chat lifecycle: open on enter (TDLib stream optimization).
@@ -117,6 +174,8 @@ class ChatDetailViewModel(
                 .onSuccess { page ->
                     history.value = page
                     viewMessages(chatId, page.map { it.id })
+                    // Opening at the newest page: nothing newer to page in.
+                    _hasNewer.value = false
                 }
                 .onFailure { _error.value = it.message ?: "Failed to load history" }
             // Deep link from global search: load a window around the target.
@@ -164,17 +223,56 @@ class ChatDetailViewModel(
         }
     }
 
+    /**
+     * Pages to OLDER messages (upward scroll direction). Signals the screen
+     * about the number of prepended items so it can preserve the scroll
+     * anchor. An empty page flips [hasOlder] off (end of history).
+     */
     fun loadMore() {
-        val oldest = (history.value + incoming.value).minByOrNull { it.id }
-        val fromMessageId = oldest?.id?.takeIf { it > 0 } ?: 0L
+        if (_historyLoading.value || !_hasOlder.value) return
+        val fromMessageId = (history.value + incoming.value).oldestMessageId() ?: return
         viewModelScope.launch {
+            _historyLoading.value = true
             loadChatHistory(chatId, fromMessageId)
                 .onSuccess { page ->
-                    if (page.isNotEmpty()) {
-                        history.value = (page + history.value).distinctBy { it.id }
-                        viewMessages(chatId, page.map { it.id })
+                    val known = history.value.map { it.id }.toSet()
+                    val fresh = page.filter { it.id !in known }
+                    if (fresh.isEmpty()) {
+                        _hasOlder.value = false
+                    } else {
+                        history.value = mergeMessages(history.value, fresh)
+                        _prependCount.value = _prependCount.value + fresh.size
+                        viewMessages(chatId, fresh.map { it.id })
                     }
                 }
+            _historyLoading.value = false
+        }
+    }
+
+    /**
+     * Pages to NEWER messages (downward scroll direction). Uses TDLib's
+     * negative offset (fromMessageId, offset = -pageSize, limit = pageSize)
+     * which returns the anchor message plus up to pageSize-1 newer ones.
+     * Only reachable after a jump-to-message (otherwise hasNewer is false);
+     * an empty page flips [hasNewer] off (caught up with the newest).
+     */
+    fun loadNewer() {
+        if (_historyLoading.value || !_hasNewer.value) return
+        val anchorId = (history.value + incoming.value).newestMessageId() ?: return
+        viewModelScope.launch {
+            _historyLoading.value = true
+            loadChatHistory(chatId, fromMessageId = anchorId, limit = pageSize, offset = -pageSize)
+                .onSuccess { page ->
+                    val known = history.value.map { it.id }.toSet()
+                    val fresh = page.filter { it.id !in known && it.id > anchorId }
+                    if (fresh.isEmpty()) {
+                        _hasNewer.value = false
+                    } else {
+                        history.value = mergeMessages(history.value, fresh)
+                        viewMessages(chatId, fresh.map { it.id })
+                    }
+                }
+            _historyLoading.value = false
         }
     }
 
@@ -237,15 +335,20 @@ class ChatDetailViewModel(
             return
         }
         viewModelScope.launch {
-            val after = loadChatHistory(chatId, fromMessageId = messageId + 1, limit = 25)
+            // The window AROUND the target: the target plus newer context via a
+            // negative offset, and older context below it.
+            val newer = loadChatHistory(chatId, fromMessageId = messageId, limit = 50, offset = -50)
                 .getOrDefault(emptyList())
-            val before = loadChatHistory(chatId, fromMessageId = messageId, limit = 25)
+                .filter { it.id >= messageId }
+            val older = loadChatHistory(chatId, fromMessageId = messageId, limit = 25)
                 .getOrDefault(emptyList())
-            val window = (after + before).distinctBy { it.id }
-            if (window.isNotEmpty()) {
-                history.value = (history.value + window)
-                    .distinctBy { it.id }
-                    .sortedWith(compareByDescending<Message> { it.date }.thenByDescending { it.id })
+                .filter { it.id < messageId }
+            val window = mergeMessages(newer, older)
+            if (window.any { it.id == messageId }) {
+                history.value = mergeMessages(history.value, window)
+                // There is newer history above the window unless the newer
+                // page came up short (i.e. it reached the newest messages).
+                _hasNewer.value = newer.size < 50
                 _scrollTarget.value = messageId
             } else {
                 _error.value = "Message not found"
