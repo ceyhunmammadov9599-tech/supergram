@@ -5,6 +5,7 @@ import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.MediaKind
 import com.supergram.app.domain.model.Message
+import com.supergram.app.domain.model.SearchFilter
 import com.supergram.app.domain.model.SearchPage
 import com.supergram.app.domain.repository.ChatRepository
 import kotlinx.coroutines.CoroutineName
@@ -93,12 +94,50 @@ class ChatRepositoryImpl(
         messages.map { it.toDomainMessage() }
     }
 
-    override suspend fun sendMessage(chatId: Long, text: String): Result<Unit> = runCatching {
+    override suspend fun sendMessage(
+        chatId: Long,
+        text: String,
+        replyToMessageId: Long?,
+    ): Result<Unit> = runCatching {
         val request = TdApi.SendMessage().apply {
             this.chatId = chatId
+            replyToMessageId?.let { id ->
+                replyTo = TdApi.InputMessageReplyToMessage().apply { messageId = id }
+            }
             inputMessageContent = TdApi.InputMessageText().apply {
                 this.text = TdApi.FormattedText().apply { this.text = text }
             }
+        }
+        ifErrorThrow(clientManager.send(request))
+    }
+
+    override suspend fun forwardMessages(
+        fromChatId: Long,
+        toChatId: Long,
+        messageIds: List<Long>,
+    ): Result<Unit> = runCatching {
+        if (messageIds.isEmpty()) return@runCatching
+        val request = TdApi.ForwardMessages().apply {
+            chatId = toChatId
+            this.fromChatId = fromChatId
+            this.messageIds = messageIds.toLongArray()
+            options = TdApi.MessageSendOptions()
+            sendCopy = false
+            removeCaption = false
+        }
+        ifErrorThrow(clientManager.send(request))
+    }
+
+    override suspend fun deleteMessages(
+        chatId: Long,
+        messageIds: List<Long>,
+        revoke: Boolean,
+    ): Result<Unit> = runCatching {
+        if (messageIds.isEmpty()) return@runCatching
+        val request = TdApi.DeleteMessages().apply {
+            this.chatId = chatId
+            this.messageIds = messageIds.toLongArray()
+            this.revoke = revoke
         }
         ifErrorThrow(clientManager.send(request))
     }
@@ -128,13 +167,16 @@ class ChatRepositoryImpl(
         query: String,
         limit: Int,
         fromMessageId: Long,
+        filter: SearchFilter,
     ): Result<SearchPage> = runCatching {
+        val tdFilter = filter.toTdFilter()
         val request = TdApi.SearchChatMessages().apply {
             this.chatId = chatId
             this.query = query
             this.limit = limit
             offset = 0
             this.fromMessageId = fromMessageId
+            this.filter = tdFilter
         }
         val result = clientManager.send(request)
         ifErrorThrow(result)
@@ -153,12 +195,15 @@ class ChatRepositoryImpl(
         query: String,
         limit: Int,
         offset: String,
+        filter: SearchFilter,
     ): Result<SearchPage> = runCatching {
+        val tdFilter = filter.toTdFilter()
         val request = TdApi.SearchMessages().apply {
             chatList = TdApi.ChatListMain()
             this.query = query
             this.offset = offset
             this.limit = limit
+            this.filter = tdFilter
         }
         val result = clientManager.send(request)
         ifErrorThrow(result)
@@ -183,7 +228,15 @@ class ChatRepositoryImpl(
         )
     }
 
-    /** Chat display title via GetChat (fallback to a generic label). */
+    /** Domain search filter -> TDLib filter (null = no filter). Data layer only. */
+private fun SearchFilter.toTdFilter(): TdApi.SearchMessagesFilter? = when (this) {
+    SearchFilter.ALL -> null
+    SearchFilter.PHOTOS -> TdApi.SearchMessagesFilterPhoto()
+    SearchFilter.DOCUMENTS -> TdApi.SearchMessagesFilterDocument()
+    SearchFilter.LINKS -> TdApi.SearchMessagesFilterUrl()
+}
+
+/** Chat display title via GetChat (fallback to a generic label). */
     private suspend fun resolveChatTitle(chatId: Long): String =
         when (val chat = TelegramClientManager.send(TdApi.GetChat(chatId))) {
             is TdApi.Chat -> chat.title.takeIf { it.isNotBlank() } ?: "Chat"

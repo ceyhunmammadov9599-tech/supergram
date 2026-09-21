@@ -3,6 +3,7 @@ package com.supergram.app.domain.repository
 import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.Message
+import com.supergram.app.domain.model.SearchFilter
 import com.supergram.app.domain.model.SearchPage
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,8 +38,29 @@ interface ChatRepository {
         offset: Int = 0,
     ): Result<List<Message>>
 
-    /** Sends a plain-text message. */
-    suspend fun sendMessage(chatId: Long, text: String): Result<Unit>
+    /**
+     * Sends a plain-text message, optionally replying to a message
+     * (TdApi.InputMessageReplyToMessage).
+     */
+    suspend fun sendMessage(
+        chatId: Long,
+        text: String,
+        replyToMessageId: Long? = null,
+    ): Result<Unit>
+
+    /** Forwards messages from one chat to another (TdApi.ForwardMessages). */
+    suspend fun forwardMessages(
+        fromChatId: Long,
+        toChatId: Long,
+        messageIds: List<Long>,
+    ): Result<Unit>
+
+    /** Deletes messages (TdApi.DeleteMessages); revoke = for both sides. */
+    suspend fun deleteMessages(
+        chatId: Long,
+        messageIds: List<Long>,
+        revoke: Boolean,
+    ): Result<Unit>
 
     /** Opens a chat (TDLib stream optimization; required before ViewMessages). */
     suspend fun openChat(chatId: Long): Result<Unit>
@@ -61,6 +83,7 @@ interface ChatRepository {
         query: String,
         limit: Int = 20,
         fromMessageId: Long = 0,
+        filter: SearchFilter = SearchFilter.ALL,
     ): Result<SearchPage>
 
     /**
@@ -71,5 +94,6 @@ interface ChatRepository {
         query: String,
         limit: Int = 20,
         offset: String = "",
+        filter: SearchFilter = SearchFilter.ALL,
     ): Result<SearchPage>
 }

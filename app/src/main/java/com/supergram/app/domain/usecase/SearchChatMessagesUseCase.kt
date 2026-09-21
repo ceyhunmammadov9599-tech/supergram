@@ -1,5 +1,6 @@
 package com.supergram.app.domain.usecase
 
+import com.supergram.app.domain.model.SearchFilter
 import com.supergram.app.domain.model.SearchPage
 import com.supergram.app.domain.repository.ChatRepository
 
@@ -13,5 +14,6 @@ class SearchChatMessagesUseCase(private val repository: ChatRepository) {
         query: String,
         limit: Int = 20,
         fromMessageId: Long = 0,
-    ): Result<SearchPage> = repository.searchChatMessages(chatId, query, limit, fromMessageId)
+        filter: SearchFilter = SearchFilter.ALL,
+    ): Result<SearchPage> = repository.searchChatMessages(chatId, query, limit, fromMessageId, filter)
 }

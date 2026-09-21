@@ -4,6 +4,8 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -34,6 +37,11 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -94,6 +102,11 @@ fun ChatDetailScreen(
     val historyLoading by viewModel.historyLoading.collectAsStateWithLifecycle()
     val prependCount by viewModel.prependCount.collectAsStateWithLifecycle()
     val searchPaginator by viewModel.searchPaginator.collectAsStateWithLifecycle()
+    val contextMenuMessage by viewModel.contextMenuMessage.collectAsStateWithLifecycle()
+    val forwardTarget by viewModel.forwardTarget.collectAsStateWithLifecycle()
+    val replyDraft by viewModel.replyDraft.collectAsStateWithLifecycle()
+    val deleteDialog by viewModel.deleteDialog.collectAsStateWithLifecycle()
+    val allChats by viewModel.chats.collectAsStateWithLifecycle()
 
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -242,6 +255,38 @@ fun ChatDetailScreen(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                         )
                     }
+                    replyDraft?.let { draft ->
+                        androidx.compose.foundation.layout.Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 0.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                                    Text(
+                                        draft.title,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Text(
+                                        draft.snippet.ifBlank { "Original message" },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            IconButton(onClick = viewModel::cancelReply) {
+                                Icon(Icons.Filled.Close, contentDescription = "Cancel reply")
+                            }
+                        }
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -363,10 +408,118 @@ fun ChatDetailScreen(
                             onDownload = viewModel::downloadFile,
                             onToggleVoice = viewModel::toggleVoice,
                             onOpenPhoto = { viewerMedia = it },
+                            onLongPress = { viewModel.openContextMenu(message) },
                         )
                     }
                 }
             }
+        }
+
+        // Long-press context menu (bottom sheet): Reply / Forward / Delete.
+        contextMenuMessage?.let { message ->
+            ModalBottomSheet(
+                onDismissRequest = viewModel::closeContextMenu,
+            ) {
+                Column(Modifier.padding(bottom = 24.dp)) {
+                    ListItem(
+                        headlineContent = { Text("Reply") },
+                        leadingContent = {
+                            Icon(
+                                painterResource(R.drawable.ic_reply),
+                                contentDescription = null,
+                            )
+                        },
+                        modifier = Modifier.clickable {
+                            viewModel.startReply(message)
+                        },
+                    )
+                    ListItem(
+                        headlineContent = { Text("Forward") },
+                        leadingContent = {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                        },
+                        modifier = Modifier.clickable {
+                            viewModel.startForward(message)
+                        },
+                    )
+                    ListItem(
+                        headlineContent = { Text("Delete") },
+                        leadingContent = {
+                            Icon(Icons.Filled.Delete, contentDescription = null)
+                        },
+                        modifier = Modifier.clickable {
+                            viewModel.showDeleteDialog(message)
+                        },
+                    )
+                }
+            }
+        }
+
+        // Forward destination picker.
+        forwardTarget?.let { target ->
+            ModalBottomSheet(
+                onDismissRequest = viewModel::closeForwardPicker,
+            ) {
+                Column(Modifier.padding(bottom = 24.dp)) {
+                    Text(
+                        "Forward to",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                    LazyColumn {
+                        items(
+                            allChats.filter { it.id != target.chatId },
+                            key = { "fwd_" + it.id },
+                        ) { chat ->
+                            ListItem(
+                                headlineContent = { Text(chat.title) },
+                                supportingContent = {
+                                    Text(
+                                        chat.lastMessageSnippet ?: "No messages",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                modifier = Modifier.clickable { viewModel.forwardTo(chat.id) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Delete confirmation dialog with a revoke ("for everyone") checkbox.
+        if (deleteDialog.visible) {
+            AlertDialog(
+                onDismissRequest = viewModel::dismissDeleteDialog,
+                title = { Text("Delete message?") },
+                text = {
+                    Column {
+                        Text("This message will be deleted.")
+                        if (deleteDialog.canRevoke) {
+                            androidx.compose.foundation.layout.Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = deleteDialog.revoke,
+                                    onCheckedChange = { viewModel.toggleDeleteRevoke() },
+                                )
+                                Text("Delete for everyone")
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = viewModel::confirmDelete) {
+                        Text("Delete", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = viewModel::dismissDeleteDialog) {
+                        Text("Cancel")
+                    }
+                },
+            )
         }
 
         // Full-screen photo viewer overlay.
@@ -379,6 +532,7 @@ fun ChatDetailScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     message: Message,
@@ -386,6 +540,7 @@ private fun MessageBubble(
     onDownload: (Int) -> Unit,
     onToggleVoice: (MediaFile) -> Unit,
     onOpenPhoto: (MediaFile) -> Unit,
+    onLongPress: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -408,7 +563,12 @@ private fun MessageBubble(
                 MaterialTheme.colorScheme.surfaceVariant
             },
             shape = shape,
-            modifier = Modifier.widthIn(max = 300.dp),
+            modifier = Modifier
+                .widthIn(max = 300.dp)
+                .combinedClickable(
+                    onClick = {},
+                    onLongClick = onLongPress,
+                ),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 message.media?.let { media ->

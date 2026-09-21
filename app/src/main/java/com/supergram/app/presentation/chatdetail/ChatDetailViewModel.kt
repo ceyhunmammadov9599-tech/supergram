@@ -7,6 +7,8 @@ import com.supergram.app.domain.model.MediaFile
 import com.supergram.app.domain.model.Message
 import com.supergram.app.domain.model.SearchPage
 import com.supergram.app.domain.model.SearchPaginator
+import com.supergram.app.domain.model.DeleteDialogState
+import com.supergram.app.domain.model.ReplyDraft
 import com.supergram.app.domain.model.SearchResult
 import com.supergram.app.domain.model.mergeMessages
 import com.supergram.app.domain.model.newestMessageId
@@ -39,8 +41,11 @@ import com.supergram.app.domain.usecase.searchDebounce
 class ChatDetailViewModel(
     private val chatId: Long,
     observeNewMessages: com.supergram.app.domain.usecase.ObserveNewMessagesUseCase,
+    observeChatList: com.supergram.app.domain.usecase.ObserveChatListUseCase,
     private val loadChatHistory: com.supergram.app.domain.usecase.LoadChatHistoryUseCase,
     private val sendMessage: com.supergram.app.domain.usecase.SendMessageUseCase,
+    private val forwardMessages: com.supergram.app.domain.usecase.ForwardMessagesUseCase,
+    private val deleteMessages: com.supergram.app.domain.usecase.DeleteMessagesUseCase,
     private val openChat: com.supergram.app.domain.usecase.OpenChatUseCase,
     private val closeChat: com.supergram.app.domain.usecase.CloseChatUseCase,
     private val viewMessages: com.supergram.app.domain.usecase.ViewMessagesUseCase,
@@ -84,6 +89,99 @@ class ChatDetailViewModel(
 
     /** Decides play vs download and auto-plays once a pending download completes. */
     private val autoPlay = com.supergram.app.domain.usecase.VoiceAutoPlayController()
+
+    // ---------------------- Message context actions ----------------------
+
+    /** All chats, for the forward destination picker. */
+    val chats: StateFlow<List<com.supergram.app.domain.model.Chat>> =
+        observeChatList().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** The message whose long-press context menu (bottom sheet) is open. */
+    private val _contextMenuMessage = MutableStateFlow<Message?>(null)
+    val contextMenuMessage: StateFlow<Message?> = _contextMenuMessage.asStateFlow()
+
+    /** The message being forwarded (destination picker is open for it). */
+    private val _forwardTarget = MutableStateFlow<Message?>(null)
+    val forwardTarget: StateFlow<Message?> = _forwardTarget.asStateFlow()
+
+    /** In-progress reply draft shown in the dismissible preview bar. */
+    private val _replyDraft = MutableStateFlow<ReplyDraft?>(null)
+    val replyDraft: StateFlow<ReplyDraft?> = _replyDraft.asStateFlow()
+
+    /** Delete-confirmation dialog state (pure state machine). */
+    private val _deleteDialog = MutableStateFlow(DeleteDialogState.HIDDEN)
+    val deleteDialog: StateFlow<DeleteDialogState> = _deleteDialog.asStateFlow()
+
+    fun openContextMenu(message: Message) {
+        _contextMenuMessage.value = message
+    }
+
+    fun closeContextMenu() {
+        _contextMenuMessage.value = null
+    }
+
+    /** Reply action: remember the draft; the input bar now sends with replyTo. */
+    fun startReply(message: Message) {
+        _replyDraft.value = ReplyDraft.of(message)
+        _contextMenuMessage.value = null
+    }
+
+    fun cancelReply() {
+        _replyDraft.value = null
+    }
+
+    /** Forward action: open the destination picker for this message. */
+    fun startForward(message: Message) {
+        _forwardTarget.value = message
+        _contextMenuMessage.value = null
+    }
+
+    fun closeForwardPicker() {
+        _forwardTarget.value = null
+    }
+
+    /** Forwards the pending target to the given destination chat. */
+    fun forwardTo(toChatId: Long) {
+        val target = _forwardTarget.value ?: return
+        if (toChatId == chatId) {
+            _forwardTarget.value = null
+            return // forwarding to the same chat: no-op (avoid duplicates)
+        }
+        viewModelScope.launch {
+            forwardMessages(chatId, toChatId, listOf(target.id))
+                .onSuccess { _forwardTarget.value = null }
+                .onFailure { _error.value = it.message ?: "Failed to forward message" }
+        }
+    }
+
+    /** Delete action: open the confirmation dialog. */
+    fun showDeleteDialog(message: Message) {
+        _deleteDialog.value = _deleteDialog.value.shownFor(message.id, canRevoke = message.isOutgoing)
+        _contextMenuMessage.value = null
+    }
+
+    /** Revoke ("delete for everyone") checkbox toggle. */
+    fun toggleDeleteRevoke() {
+        _deleteDialog.value = _deleteDialog.value.revokeToggled()
+    }
+
+    fun dismissDeleteDialog() {
+        _deleteDialog.value = _deleteDialog.value.dismissed()
+    }
+
+    /** Confirmed deletion: dispatch via TDLib and drop the message locally. */
+    fun confirmDelete() {
+        val request = _deleteDialog.value.confirmed() ?: return
+        _deleteDialog.value = _deleteDialog.value.dismissed()
+        viewModelScope.launch {
+            deleteMessages(chatId, listOf(request.messageId), request.revoke)
+                .onSuccess {
+                    history.value = history.value.filterNot { it.id == request.messageId }
+                    incoming.value = incoming.value.filterNot { it.id == request.messageId }
+                }
+                .onFailure { _error.value = it.message ?: "Failed to delete message" }
+        }
+    }
 
     // ------------------------- In-chat search -------------------------
 
@@ -206,9 +304,10 @@ class ChatDetailViewModel(
 
     fun send(text: String) {
         if (text.isBlank() || _sending.value) return
+        val replyTo = _replyDraft.value?.messageId
         viewModelScope.launch {
             _sending.value = true
-            sendMessage(chatId, text)
+            sendMessage(chatId, text, replyToMessageId = replyTo)
                 .onSuccess { incoming.value = (incoming.value + Message(
                     id = -System.nanoTime(), // optimistic local echo
                     chatId = chatId,
@@ -220,6 +319,7 @@ class ChatDetailViewModel(
                 )).distinctBy { it.id } }
                 .onFailure { _error.value = it.message ?: "Failed to send message" }
             _sending.value = false
+            _replyDraft.value = null
         }
     }
 
@@ -379,8 +479,11 @@ class ChatDetailViewModel(
         ): ChatDetailViewModel = ChatDetailViewModel(
             chatId,
             AppContainer.observeNewMessages,
+            AppContainer.observeChatList,
             AppContainer.loadChatHistory,
             AppContainer.sendMessage,
+            AppContainer.forwardMessages,
+            AppContainer.deleteMessages,
             AppContainer.openChat,
             AppContainer.closeChat,
             AppContainer.viewMessages,

@@ -70,6 +70,7 @@ fun ChatListScreen(
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
     val searchLoadingMore by viewModel.paginator.collectAsStateWithLifecycle()
+    val searchFilter by viewModel.searchFilter.collectAsStateWithLifecycle()
 
     val searchListState = androidx.compose.foundation.lazy.rememberLazyListState()
 
@@ -161,6 +162,23 @@ fun ChatListScreen(
                         )
                     }
                 } else {
+                    androidx.compose.foundation.layout.Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                    ) {
+                        androidx.compose.foundation.layout.Row(
+                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                        ) {
+                            com.supergram.app.domain.model.SearchFilter.entries.forEach { filter ->
+                                androidx.compose.material3.FilterChip(
+                                    selected = filter == searchFilter,
+                                    onClick = { viewModel.setFilter(filter) },
+                                    label = { Text(filter.label) },
+                                )
+                            }
+                        }
+                    }
                     LazyColumn(
                         state = searchListState,
                         modifier = Modifier.fillMaxWidth().weight(1f),

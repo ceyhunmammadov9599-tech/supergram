@@ -129,6 +129,33 @@ class SearchPaginatorTest {
     }
 
     @Test
+    fun `start resets pagination across filter changes`() {
+        // An accumulated PHOTOS search...
+        val photos = SearchPaginator.start("q", SearchFilter.PHOTOS)
+            .appendGlobalPage(SearchPage(listOf(result(1)), nextOffset = "photos-cursor"))
+
+        // ...switching the filter chip to LINKS fully resets the accumulator:
+        val links = SearchPaginator.start("q", SearchFilter.LINKS)
+
+        assertEquals(SearchFilter.PHOTOS, photos.filter)
+        assertEquals(SearchFilter.LINKS, links.filter)
+        assertTrue(links.results.isEmpty())
+        assertEquals("", links.nextOffset)
+        assertEquals(0L, links.nextFromMessageId)
+        assertTrue(links.hasMore)
+    }
+
+    @Test
+    fun `filter is carried on accumulated pages and load-more requests`() {
+        val state = SearchPaginator.start("q", SearchFilter.DOCUMENTS)
+            .appendGlobalPage(SearchPage(listOf(result(1)), nextOffset = "doc-cursor"))
+
+        assertEquals(SearchFilter.DOCUMENTS, state.filter)
+        assertEquals("doc-cursor", state.nextOffset)
+        assertTrue(state.hasMore)
+    }
+
+    @Test
     fun `start fully replaces a previously accumulated state`() {
         val accumulated = SearchPaginator.start("old")
             .appendGlobalPage(SearchPage(listOf(result(1)), nextOffset = "c"))

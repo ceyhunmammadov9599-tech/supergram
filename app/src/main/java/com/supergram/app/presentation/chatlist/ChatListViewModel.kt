@@ -5,7 +5,9 @@ import androidx.lifecycle.viewModelScope
 import com.supergram.app.di.AppContainer
 import com.supergram.app.domain.model.Chat
 import com.supergram.app.domain.model.SearchPage
+import com.supergram.app.domain.model.SearchFilter
 import com.supergram.app.domain.model.SearchPaginator
+import kotlinx.coroutines.flow.combine
 import com.supergram.app.domain.usecase.searchDebounce
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,6 +50,10 @@ class ChatListViewModel(
     private val _searchActive = MutableStateFlow(false)
     val searchActive: StateFlow<Boolean> = _searchActive.asStateFlow()
 
+    /** Active content filter for the global search (chips in the search bar). */
+    private val _searchFilter = MutableStateFlow(SearchFilter.ALL)
+    val searchFilter: StateFlow<SearchFilter> = _searchFilter.asStateFlow()
+
     /** Paged global-search state: accumulated results + TDLib offset cursor. */
     private val _paginator = MutableStateFlow(SearchPaginator())
     val paginator: StateFlow<SearchPaginator> = _paginator.asStateFlow()
@@ -59,14 +65,22 @@ class ChatListViewModel(
             .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     init {
-        // Debounced query -> reset the paginator and fetch the first page.
-        _searchQuery
-            .searchDebounce()
-            .onEach { query ->
-                _paginator.value = SearchPaginator.start(query)
+        // Debounced query + active filter -> reset the paginator and fetch
+        // the first page. Filter changes take effect immediately.
+        combine(
+            _searchQuery.searchDebounce(),
+            _searchFilter,
+        ) { query, filter -> query to filter }
+            .onEach { (query, filter) ->
+                _paginator.value = SearchPaginator.start(query, filter)
                 if (query.isNotBlank()) loadSearchPage()
             }
             .launchIn(viewModelScope)
+    }
+
+    /** Chip action: switch the search content filter (resets pagination). */
+    fun setFilter(filter: SearchFilter) {
+        if (_searchFilter.value != filter) _searchFilter.value = filter
     }
 
     /**
@@ -87,7 +101,7 @@ class ChatListViewModel(
         val state = _paginator.value
         if (!state.hasMore || state.loadingMore) return
         _paginator.value = state.beginLoadingMore()
-        searchMessages(state.query, offset = state.nextOffset ?: "")
+        searchMessages(state.query, offset = state.nextOffset ?: "", filter = state.filter)
             .fold(
                 onSuccess = { page: SearchPage -> _paginator.value = _paginator.value.appendGlobalPage(page) },
                 onFailure = { _paginator.value = _paginator.value.loadFailed() },

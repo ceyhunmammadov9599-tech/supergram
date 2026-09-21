@@ -29,6 +29,7 @@ data class SearchPage(
  */
 data class SearchPaginator(
     val query: String = "",
+    val filter: SearchFilter = SearchFilter.ALL,
     val results: List<SearchResult> = emptyList(),
     val nextOffset: String? = "",
     val nextFromMessageId: Long? = 0L,
@@ -36,14 +37,16 @@ data class SearchPaginator(
     val loadingMore: Boolean = false,
 ) {
     companion object {
-        /** Fresh state for a new query: no results, cursors at start. */
-        fun start(query: String): SearchPaginator = SearchPaginator(
-            query = query,
-            nextOffset = "",
-            nextFromMessageId = 0L,
-            hasMore = true,
-            loadingMore = false,
-        )
+        /** Fresh state for a new query/filter: no results, cursors at start. */
+        fun start(query: String, filter: SearchFilter = SearchFilter.ALL): SearchPaginator =
+            SearchPaginator(
+                query = query,
+                filter = filter,
+                nextOffset = "",
+                nextFromMessageId = 0L,
+                hasMore = true,
+                loadingMore = false,
+            )
     }
 
     /** Marks a page request as in flight (load-more guard). */

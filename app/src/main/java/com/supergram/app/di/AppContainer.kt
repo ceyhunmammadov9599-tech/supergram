@@ -102,6 +102,16 @@ object AppContainer {
         com.supergram.app.domain.usecase.SearchMessagesUseCase(chatRepository)
     }
 
+    /** Forwards messages between chats (TdApi.ForwardMessages). */
+    val forwardMessages: com.supergram.app.domain.usecase.ForwardMessagesUseCase by lazy {
+        com.supergram.app.domain.usecase.ForwardMessagesUseCase(chatRepository)
+    }
+
+    /** Deletes messages (TdApi.DeleteMessages). */
+    val deleteMessages: com.supergram.app.domain.usecase.DeleteMessagesUseCase by lazy {
+        com.supergram.app.domain.usecase.DeleteMessagesUseCase(chatRepository)
+    }
+
     val observeFileUpdates: ObserveFileUpdatesUseCase by lazy {
         ObserveFileUpdatesUseCase(chatRepository)
     }
