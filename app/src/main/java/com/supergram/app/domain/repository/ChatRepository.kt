@@ -21,6 +21,15 @@ interface ChatRepository {
     /** Hot stream of file download state changes (photos, documents). */
     val fileUpdates: SharedFlow<MediaFile>
 
+    /** Chat IDs whose pinned message changed or was deleted. */
+    val pinnedChanges: SharedFlow<Long>
+
+    /** Most recent pinned message, or null if none exists. */
+    suspend fun getPinnedMessage(chatId: Long): Result<Message?>
+
+    /** Inbox read cursor on entry; null when no messages were unread. */
+    suspend fun getUnreadCursor(chatId: Long): Result<Long?>
+
     /** Loads the chat list from TDLib and publishes it into [chats]. */
     suspend fun loadChats(limit: Int): Result<Unit>
 

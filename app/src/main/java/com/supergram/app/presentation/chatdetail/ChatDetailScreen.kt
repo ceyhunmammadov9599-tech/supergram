@@ -53,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -107,6 +108,12 @@ fun ChatDetailScreen(
     val replyDraft by viewModel.replyDraft.collectAsStateWithLifecycle()
     val deleteDialog by viewModel.deleteDialog.collectAsStateWithLifecycle()
     val allChats by viewModel.chats.collectAsStateWithLifecycle()
+    val selection by viewModel.selection.collectAsStateWithLifecycle()
+    val batchForwardIds by viewModel.batchForwardIds.collectAsStateWithLifecycle()
+    val pinnedMessage by viewModel.pinnedMessage.collectAsStateWithLifecycle()
+    val hiddenPinnedId by viewModel.hiddenPinnedId.collectAsStateWithLifecycle()
+    val unreadBoundaryId by viewModel.unreadBoundaryId.collectAsStateWithLifecycle()
+    BackHandler(enabled = selection.active) { viewModel.clearSelection() }
 
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -116,6 +123,9 @@ fun ChatDetailScreen(
 
     // Newest at the bottom; auto-scroll when a message arrives.
     val displayList = remember(messages) { messages.asReversed() }
+    val dividerIndex = displayList.indexOfFirst { it.id == unreadBoundaryId }
+    val dividerPresent = dividerIndex >= 0
+    fun itemIndex(index: Int): Int = index + if (dividerPresent && index >= dividerIndex) 1 else 0
 
     // Bidirectional paging triggers:
     //  - near the TOP -> page in older messages
@@ -143,7 +153,10 @@ fun ChatDetailScreen(
 
     LaunchedEffect(shouldLoadOlder) {
         if (shouldLoadOlder && !historyLoading && hasOlder) {
-            anchorMessageId = displayList.getOrNull(listState.firstVisibleItemIndex)?.id
+            val visibleKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key
+            anchorMessageId = (visibleKey as? Long)?.takeIf { id ->
+                displayList.any { it.id == id }
+            }
             anchorScrollOffset = listState.firstVisibleItemScrollOffset
             viewModel.loadMore()
         }
@@ -162,7 +175,7 @@ fun ChatDetailScreen(
             val key = anchorMessageId
             if (key != null) {
                 val index = displayList.indexOfFirst { it.id == key }
-                if (index >= 0) listState.scrollToItem(index, anchorScrollOffset)
+                if (index >= 0) listState.scrollToItem(itemIndex(index), anchorScrollOffset)
             }
             anchorMessageId = null
         }
@@ -181,10 +194,10 @@ fun ChatDetailScreen(
     LaunchedEffect(messages.size) {
         if (messages.isEmpty()) return@LaunchedEffect
         if (!initialScrollDone && scrollTarget == null) {
-            listState.animateScrollToItem(messages.size - 1)
+            listState.animateScrollToItem(itemIndex(messages.size - 1))
             initialScrollDone = true
         } else if (nearBottom && scrollTarget == null) {
-            listState.animateScrollToItem(messages.size - 1)
+            listState.animateScrollToItem(itemIndex(messages.size - 1))
         }
     }
 
@@ -196,7 +209,7 @@ fun ChatDetailScreen(
             val list = viewModel.messages.value.asReversed()
             val index = list.indexOfFirst { it.id == target }
             if (index >= 0) {
-                listState.animateScrollToItem(index)
+                listState.animateScrollToItem(itemIndex(index))
                 viewModel.clearScrollTarget()
                 return@LaunchedEffect
             }
@@ -208,7 +221,24 @@ fun ChatDetailScreen(
     Box(Modifier.fillMaxSize()) {
         Scaffold(
             topBar = {
-                if (searchActive) {
+                Column {
+                if (selection.active) {
+                    TopAppBar(
+                        title = { Text("${selection.count} selected") },
+                        navigationIcon = {
+                            IconButton(onClick = viewModel::clearSelection) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear selection")
+                            }
+                        },
+                        actions = {
+                            TextButton(onClick = viewModel::selectAllMessages) { Text("All loaded") }
+                            TextButton(onClick = viewModel::startBatchForward) { Text("Forward") }
+                            IconButton(onClick = viewModel::startBatchDelete) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
+                            }
+                        },
+                    )
+                } else if (searchActive) {
                     // In-chat search mode: query field replaces the title.
                     androidx.compose.foundation.layout.Row(
                         modifier = Modifier
@@ -233,7 +263,10 @@ fun ChatDetailScreen(
                             Text(chatTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         },
                         navigationIcon = {
-                            IconButton(onClick = onBack) {
+                            IconButton(onClick = {
+                                viewModel.clearSelection()
+                                onBack()
+                            }) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                             }
                         },
@@ -243,6 +276,32 @@ fun ChatDetailScreen(
                             }
                         },
                     )
+                }
+                if (!searchActive && pinnedMessage != null && pinnedMessage?.id != hiddenPinnedId) {
+                    val pinned = pinnedMessage!!
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(
+                                modifier = Modifier.weight(1f)
+                                    .clickable { viewModel.jumpToPinnedMessage() }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                            ) {
+                                Text("Pinned message", style = MaterialTheme.typography.labelMedium)
+                                Text(
+                                    pinned.text.ifBlank { pinned.media?.kind?.name ?: "Message" },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            IconButton(onClick = viewModel::dismissPinnedMessage) {
+                                Icon(Icons.Default.Close, contentDescription = "Dismiss pinned message")
+                            }
+                        }
+                    }
+                }
                 }
             },
             bottomBar = {
@@ -401,15 +460,44 @@ fun ChatDetailScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    items(displayList, key = { it.id }) { message ->
+                    displayList.forEachIndexed { index, message ->
+                        if (index == dividerIndex) {
+                            item(key = "unread_divider") {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                ) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.secondaryContainer,
+                                        shape = RoundedCornerShape(16.dp),
+                                    ) {
+                                        Text(
+                                            "Unread Messages",
+                                            Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                            style = MaterialTheme.typography.labelMedium,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        item(key = message.id) {
                         MessageBubble(
                             message = message,
                             voiceState = voiceState,
                             onDownload = viewModel::downloadFile,
                             onToggleVoice = viewModel::toggleVoice,
                             onOpenPhoto = { viewerMedia = it },
-                            onLongPress = { viewModel.openContextMenu(message) },
+                            onLongPress = {
+                                if (selection.active) viewModel.toggleSelection(message.id)
+                                else viewModel.openContextMenu(message)
+                            },
+                            onTap = {
+                                if (selection.active) viewModel.toggleSelection(message.id)
+                            },
+                            selected = message.id in selection.selectedIds,
                         )
+                        }
                     }
                 }
             }
@@ -421,6 +509,10 @@ fun ChatDetailScreen(
                 onDismissRequest = viewModel::closeContextMenu,
             ) {
                 Column(Modifier.padding(bottom = 24.dp)) {
+                    ListItem(
+                        headlineContent = { Text("Select") },
+                        modifier = Modifier.clickable { viewModel.startSelection(message.id) },
+                    )
                     ListItem(
                         headlineContent = { Text("Reply") },
                         leadingContent = {
@@ -456,7 +548,7 @@ fun ChatDetailScreen(
         }
 
         // Forward destination picker.
-        forwardTarget?.let { target ->
+        if (forwardTarget != null || batchForwardIds.isNotEmpty()) {
             ModalBottomSheet(
                 onDismissRequest = viewModel::closeForwardPicker,
             ) {
@@ -468,7 +560,7 @@ fun ChatDetailScreen(
                     )
                     LazyColumn {
                         items(
-                            allChats.filter { it.id != target.chatId },
+                            allChats.filter { it.id != messages.firstOrNull()?.chatId },
                             key = { "fwd_" + it.id },
                         ) { chat ->
                             ListItem(
@@ -492,10 +584,10 @@ fun ChatDetailScreen(
         if (deleteDialog.visible) {
             AlertDialog(
                 onDismissRequest = viewModel::dismissDeleteDialog,
-                title = { Text("Delete message?") },
+                title = { Text(if (selection.active) "Delete ${selection.count} messages?" else "Delete message?") },
                 text = {
                     Column {
-                        Text("This message will be deleted.")
+                        Text(if (selection.active) "These messages will be deleted." else "This message will be deleted.")
                         if (deleteDialog.canRevoke) {
                             androidx.compose.foundation.layout.Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -541,6 +633,8 @@ private fun MessageBubble(
     onToggleVoice: (MediaFile) -> Unit,
     onOpenPhoto: (MediaFile) -> Unit,
     onLongPress: () -> Unit = {},
+    onTap: () -> Unit = {},
+    selected: Boolean = false,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -557,7 +651,9 @@ private fun MessageBubble(
             bottomEnd = if (message.isOutgoing) 2.dp else 12.dp,
         )
         Surface(
-            color = if (message.isOutgoing) {
+            color = if (selected) {
+                MaterialTheme.colorScheme.tertiaryContainer
+            } else if (message.isOutgoing) {
                 MaterialTheme.colorScheme.primary
             } else {
                 MaterialTheme.colorScheme.surfaceVariant
@@ -566,7 +662,7 @@ private fun MessageBubble(
             modifier = Modifier
                 .widthIn(max = 300.dp)
                 .combinedClickable(
-                    onClick = {},
+                    onClick = onTap,
                     onLongClick = onLongPress,
                 ),
         ) {

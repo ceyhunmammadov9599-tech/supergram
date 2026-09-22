@@ -112,6 +112,16 @@ object AppContainer {
         com.supergram.app.domain.usecase.DeleteMessagesUseCase(chatRepository)
     }
 
+    val getPinnedMessage by lazy {
+        com.supergram.app.domain.usecase.GetPinnedMessageUseCase(chatRepository)
+    }
+    val getUnreadCursor by lazy {
+        com.supergram.app.domain.usecase.GetUnreadCursorUseCase(chatRepository)
+    }
+    val observePinnedChanges by lazy {
+        com.supergram.app.domain.usecase.ObservePinnedChangesUseCase(chatRepository)
+    }
+
     val observeFileUpdates: ObserveFileUpdatesUseCase by lazy {
         ObserveFileUpdatesUseCase(chatRepository)
     }

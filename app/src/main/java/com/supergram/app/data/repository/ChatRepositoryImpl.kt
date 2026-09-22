@@ -51,6 +51,25 @@ class ChatRepositoryImpl(
     private val _fileUpdates = MutableSharedFlow<MediaFile>(extraBufferCapacity = 256)
     override val fileUpdates: SharedFlow<MediaFile> = _fileUpdates.asSharedFlow()
 
+    private val _pinnedChanges = MutableSharedFlow<Long>(extraBufferCapacity = 64)
+    override val pinnedChanges: SharedFlow<Long> = _pinnedChanges.asSharedFlow()
+
+    override suspend fun getPinnedMessage(chatId: Long): Result<Message?> = runCatching {
+        when (val response = clientManager.send(TdApi.GetChatPinnedMessage(chatId))) {
+            is TdApi.Message -> response.toDomainMessage()
+            is TdApi.Error -> if (response.code == 404) null else throw IllegalStateException(response.message)
+            else -> null
+        }
+    }
+
+    override suspend fun getUnreadCursor(chatId: Long): Result<Long?> = runCatching {
+        val response = clientManager.send(TdApi.GetChat(chatId))
+        ifErrorThrow(response)
+        (response as TdApi.Chat).let { chat ->
+            chat.lastReadInboxMessageId.takeIf { chat.unreadCount > 0 }
+        }
+    }
+
     init {
         observeTdlibUpdates()
     }
@@ -288,6 +307,12 @@ private fun SearchFilter.toTdFilter(): TdApi.SearchMessagesFilter? = when (this)
                         update.positions,
                     )
                     is TdApi.UpdateChatReadInbox -> onUnreadCount(update.chatId, update.unreadCount)
+                    is TdApi.UpdateMessageIsPinned -> {
+                        _pinnedChanges.emit(update.chatId)
+                    }
+                    is TdApi.UpdateDeleteMessages -> {
+                        _pinnedChanges.emit(update.chatId)
+                    }
                     is TdApi.UpdateFile -> onFileUpdate(update.file)
                     else -> Unit
                 }

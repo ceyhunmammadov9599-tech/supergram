@@ -8,6 +8,8 @@ import com.supergram.app.domain.model.Message
 import com.supergram.app.domain.model.SearchPage
 import com.supergram.app.domain.model.SearchPaginator
 import com.supergram.app.domain.model.DeleteDialogState
+import com.supergram.app.domain.model.MessageSelection
+import com.supergram.app.domain.model.unreadBoundary
 import com.supergram.app.domain.model.ReplyDraft
 import com.supergram.app.domain.model.SearchResult
 import com.supergram.app.domain.model.mergeMessages
@@ -53,6 +55,9 @@ class ChatDetailViewModel(
     observeFileUpdates: com.supergram.app.domain.usecase.ObserveFileUpdatesUseCase,
     private val voicePlayer: com.supergram.app.core.audio.VoiceNotePlayer,
     private val searchChatMessages: com.supergram.app.domain.usecase.SearchChatMessagesUseCase,
+    private val getPinnedMessage: com.supergram.app.domain.usecase.GetPinnedMessageUseCase,
+    private val getUnreadCursor: com.supergram.app.domain.usecase.GetUnreadCursorUseCase,
+    observePinnedChanges: com.supergram.app.domain.usecase.ObservePinnedChangesUseCase,
     private val targetMessageId: Long? = null,
 ) : ViewModel() {
 
@@ -89,6 +94,59 @@ class ChatDetailViewModel(
 
     /** Decides play vs download and auto-plays once a pending download completes. */
     private val autoPlay = com.supergram.app.domain.usecase.VoiceAutoPlayController()
+
+    // ---------------------- Multi-select, pinned and unread state ----------------------
+
+    private val _selection = MutableStateFlow(MessageSelection())
+    val selection: StateFlow<MessageSelection> = _selection.asStateFlow()
+    private val _batchForwardIds = MutableStateFlow<List<Long>>(emptyList())
+    val batchForwardIds: StateFlow<List<Long>> = _batchForwardIds.asStateFlow()
+    private val _batchDeleteIds = MutableStateFlow<List<Long>>(emptyList())
+    private val _pinnedMessage = MutableStateFlow<Message?>(null)
+    val pinnedMessage: StateFlow<Message?> = _pinnedMessage.asStateFlow()
+    private val _hiddenPinnedId = MutableStateFlow<Long?>(null)
+    val hiddenPinnedId: StateFlow<Long?> = _hiddenPinnedId.asStateFlow()
+    private val _unreadCursor = MutableStateFlow<Long?>(null)
+    val unreadBoundaryId: StateFlow<Long?> =
+        combine(messages, _unreadCursor) { list, cursor ->
+            cursor?.let { unreadBoundary(list.asReversed(), it) }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    fun startSelection(messageId: Long) {
+        _selection.value = _selection.value.start(messageId)
+        _contextMenuMessage.value = null
+    }
+    fun toggleSelection(messageId: Long) {
+        _selection.value = _selection.value.toggle(messageId)
+    }
+    fun selectAllMessages() {
+        _selection.value = _selection.value.selectAll(messages.value.asReversed())
+    }
+    fun clearSelection() {
+        _selection.value = _selection.value.clear()
+    }
+    fun startBatchForward() {
+        val ids = _selection.value.payload(messages.value.asReversed())
+        if (ids.isNotEmpty()) _batchForwardIds.value = ids
+    }
+    fun startBatchDelete() {
+        val ids = _selection.value.payload(messages.value.asReversed())
+        if (ids.isEmpty()) return
+        _batchDeleteIds.value = ids
+        val canRevoke = messages.value.filter { it.id in ids }.all { it.isOutgoing }
+        _deleteDialog.value = DeleteDialogState.HIDDEN.shownFor(ids.first(), canRevoke)
+    }
+    fun dismissPinnedMessage() {
+        _hiddenPinnedId.value = _pinnedMessage.value?.id
+    }
+    fun jumpToPinnedMessage() {
+        _pinnedMessage.value?.id?.let(::jumpToMessageById)
+    }
+    private suspend fun refreshPinnedMessage() {
+        getPinnedMessage(chatId)
+            .onSuccess { pinned -> _pinnedMessage.value = pinned }
+            .onFailure { _error.value = it.message ?: "Failed to load pinned message" }
+    }
 
     // ---------------------- Message context actions ----------------------
 
@@ -138,18 +196,26 @@ class ChatDetailViewModel(
 
     fun closeForwardPicker() {
         _forwardTarget.value = null
+        _batchForwardIds.value = emptyList()
     }
 
     /** Forwards the pending target to the given destination chat. */
     fun forwardTo(toChatId: Long) {
-        val target = _forwardTarget.value ?: return
+        val target = _forwardTarget.value
+        val ids = _batchForwardIds.value.ifEmpty { target?.let { listOf(it.id) } ?: emptyList() }
+        if (ids.isEmpty()) return
         if (toChatId == chatId) {
             _forwardTarget.value = null
+            _batchForwardIds.value = emptyList()
             return // forwarding to the same chat: no-op (avoid duplicates)
         }
         viewModelScope.launch {
-            forwardMessages(chatId, toChatId, listOf(target.id))
-                .onSuccess { _forwardTarget.value = null }
+            forwardMessages(chatId, toChatId, ids)
+                .onSuccess {
+                    _forwardTarget.value = null
+                    _batchForwardIds.value = emptyList()
+                    clearSelection()
+                }
                 .onFailure { _error.value = it.message ?: "Failed to forward message" }
         }
     }
@@ -167,17 +233,21 @@ class ChatDetailViewModel(
 
     fun dismissDeleteDialog() {
         _deleteDialog.value = _deleteDialog.value.dismissed()
+        _batchDeleteIds.value = emptyList()
     }
 
     /** Confirmed deletion: dispatch via TDLib and drop the message locally. */
     fun confirmDelete() {
         val request = _deleteDialog.value.confirmed() ?: return
+        val ids = _batchDeleteIds.value.ifEmpty { listOf(request.messageId) }
         _deleteDialog.value = _deleteDialog.value.dismissed()
+        _batchDeleteIds.value = emptyList()
         viewModelScope.launch {
-            deleteMessages(chatId, listOf(request.messageId), request.revoke)
+            deleteMessages(chatId, ids, request.revoke)
                 .onSuccess {
-                    history.value = history.value.filterNot { it.id == request.messageId }
-                    incoming.value = incoming.value.filterNot { it.id == request.messageId }
+                    history.value = history.value.filterNot { it.id in ids }
+                    incoming.value = incoming.value.filterNot { it.id in ids }
+                    clearSelection()
                 }
                 .onFailure { _error.value = it.message ?: "Failed to delete message" }
         }
@@ -260,25 +330,26 @@ class ChatDetailViewModel(
     private val pageSize = 50
 
     init {
-        // Chat lifecycle: open on enter (TDLib stream optimization).
+        // Snapshot the read cursor BEFORE opening/viewing the chat. ViewMessages
+        // clears TDLib's unread count, so later reads cannot recover this divider.
         viewModelScope.launch {
+            getUnreadCursor(chatId).onSuccess { _unreadCursor.value = it }
+            refreshPinnedMessage()
             openChat(chatId)
                 .onFailure { _error.value = it.message ?: "Failed to open chat" }
-        }
-
-        // History page -> mark as viewed (clears unread counters).
-        viewModelScope.launch {
             loadChatHistory(chatId)
                 .onSuccess { page ->
                     history.value = page
                     viewMessages(chatId, page.map { it.id })
-                    // Opening at the newest page: nothing newer to page in.
                     _hasNewer.value = false
                 }
                 .onFailure { _error.value = it.message ?: "Failed to load history" }
-            // Deep link from global search: load a window around the target.
             targetMessageId?.let { jumpToMessageById(it) }
         }
+
+        observePinnedChanges().filter { it == chatId }
+            .onEach { refreshPinnedMessage() }
+            .launchIn(viewModelScope)
 
         // Real-time stream for this chat only.
         observeNewMessages()
@@ -468,6 +539,7 @@ class ChatDetailViewModel(
     override fun onCleared() {
         // Chat lifecycle: close on exit (viewModelScope is already cancelled).
         lifecycleScope.launch { closeChat(chatId) }
+        clearSelection()
         voicePlayer.stopPlayback()
         super.onCleared()
     }
@@ -491,6 +563,9 @@ class ChatDetailViewModel(
             AppContainer.observeFileUpdates,
             AppContainer.voicePlayer,
             AppContainer.searchChatMessages,
+            AppContainer.getPinnedMessage,
+            AppContainer.getUnreadCursor,
+            AppContainer.observePinnedChanges,
             targetMessageId,
         )
     }
